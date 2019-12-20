@@ -1,6 +1,6 @@
 Name:           xcp-ng-xapi-storage
 Version:        1.0.2
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        XCP-ng implementation of the xapi-storage interface
 License:        LGPLv2.1
 URL:            https://github.com/xcp-ng/xcp-ng-xapi-storage
@@ -51,5 +51,8 @@ cd build
 %{_prefix}/lib/systemd/system/qemuback.service
 
 %changelog
+* Fri Dec 20 2019 Samuel Verschelde <stormi-xcp@ylix.fr> - 1.0.2-2
+- Rebuild for XCP-ng 8.1
+
 * Wed Sep 11 2019 Ronan Abhamon <ronan.abhamon@vates.fr> - 1.0.2-1
 - Initial package
