@@ -1,0 +1,923 @@
+From a4a7e95237c8c8764fda427090122273213592d2 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 29 Jul 2021 10:34:29 +0200
+Subject: [PATCH 1/2] feat(datapath): provide a new Fspdisk plugin to support
+ FS paths
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ CMakeLists.txt                                |   2 +
+ daemons/qemuback/qemuback.py                  |  22 ++-
+ plugins/datapath/fspdisk/datapath.py          |  73 ++++++++++
+ plugins/datapath/fspdisk/plugin.py            |  33 +++++
+ .../volume/org.xen.xapi.storage.fsp/fsp.py    |   7 +
+ .../volume/org.xen.xapi.storage.fsp/plugin.py |  49 +++++++
+ plugins/volume/org.xen.xapi.storage.fsp/sr.py | 123 ++++++++++++++++
+ .../volume/org.xen.xapi.storage.fsp/volume.py |  96 ++++++++++++
+ xapi/storage/libs/image.py                    |  14 ++
+ xapi/storage/libs/libcow/datapath.py          | 137 +++++++++++-------
+ xapi/storage/libs/libcow/fsputil.py           |  14 ++
+ xapi/storage/libs/libcow/imageformat.py       |   5 +-
+ xapi/storage/libs/qemudisk.py                 |  49 ++++---
+ 13 files changed, 541 insertions(+), 83 deletions(-)
+ create mode 100644 plugins/datapath/fspdisk/datapath.py
+ create mode 100644 plugins/datapath/fspdisk/plugin.py
+ create mode 100644 plugins/volume/org.xen.xapi.storage.fsp/fsp.py
+ create mode 100644 plugins/volume/org.xen.xapi.storage.fsp/plugin.py
+ create mode 100644 plugins/volume/org.xen.xapi.storage.fsp/sr.py
+ create mode 100644 plugins/volume/org.xen.xapi.storage.fsp/volume.py
+ create mode 100644 xapi/storage/libs/libcow/fsputil.py
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6d676db..af55fa2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -31,6 +31,7 @@ find_package(Python2 COMPONENTS Interpreter REQUIRED)
+ # ------------------------------------------------------------------------------
+ 
+ set(DATAPATH_PLUGINS
++  fspdisk
+   qdisk
+   tapdisk
+ )
+@@ -38,6 +39,7 @@ set(DATAPATH_PLUGINS
+ set(VOLUME_PLUGINS
+   org.xen.xapi.storage.ext4-ng
+   org.xen.xapi.storage.filebased
++  org.xen.xapi.storage.fsp
+   org.xen.xapi.storage.nfs-ng
+   org.xen.xapi.storage.raw-device
+ )
+diff --git a/daemons/qemuback/qemuback.py b/daemons/qemuback/qemuback.py
+index eafb01e..1ce4bea 100755
+--- a/daemons/qemuback/qemuback.py
++++ b/daemons/qemuback/qemuback.py
+@@ -20,7 +20,7 @@ def read(path):
+     return data.strip()
+ 
+ 
+-def found_new_qdisk(domid, devid, uuid):
++def found_new_device(domid, devid, uuid, type):
+     q = qmp.QEMUMonitorProtocol(
+         '{}/qemu-dp/qmp_sock.{}'.format(var_run_prefix(), uuid))
+ 
+@@ -31,7 +31,7 @@ def found_new_qdisk(domid, devid, uuid):
+     params = {}
+     params['domid'] = domid
+     params['devid'] = devid
+-    params['type'] = 'qdisk'
++    params['type'] = type
+     params['blocknode'] = 'qemu_node'
+     params['devicename'] = uuid
+ 
+@@ -62,12 +62,20 @@ while True:
+     path = proc.stdout.readline().strip()  # block until we get an event
+     tokens = path.split('/')
+ 
+-    if len(tokens) > 8 and tokens[5] == 'qdisk' and tokens[8] == 'qemu-params':
++    if len(tokens) <= 8:
++        continue
++
++    type = tokens[5]
++    if (type == 'qdisk' or type == '9pfs') and tokens[8] == 'qemu-params':
+         domid = int(tokens[6])
+         devid = int(tokens[7])
+         contents = read(path)
+-        print ("Found new qdisk with domid=%d devid=%d contents=%s"
+-               % (domid, devid, contents))
+-        (prefix, uuid) = contents.split(':')
++        print ("Found new device with domid=%d devid=%d type=%s contents=%s"
++               % (domid, devid, type, contents))
++
++        # "contents" values:
++        # - if type == qdsik: "vdi:<VDI_UUID>"
++        # - if type == 9pfs: "vdi:<VDI_UUID> <9PFS_TAG> <9PFS_SECURITY_MODEL> <9PFS_PATH>"
++        (prefix, uuid) = contents.split(' ')[0].split(':')
+         if prefix == 'vdi':
+-            found_new_qdisk(domid, devid, uuid)
++            found_new_device(domid, devid, uuid, type)
+diff --git a/plugins/datapath/fspdisk/datapath.py b/plugins/datapath/fspdisk/datapath.py
+new file mode 100644
+index 0000000..46ba8c2
+--- /dev/null
++++ b/plugins/datapath/fspdisk/datapath.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python
++"""
++Datapath to share FS folders using 9pfs
++"""
++
++import urlparse
++import os
++import sys
++import xapi
++import xapi.storage.api.v5.datapath
++import xapi.storage.api.v5.volume
++import importlib
++from xapi.storage.libs.libcow.datapath import FspdiskDatapath
++from xapi.storage import log
++
++
++def get_sr_callbacks(dbg, uri):
++    u = urlparse.urlparse(uri)
++    sr = u.netloc
++    sys.path.insert(
++        0,
++        '/usr/libexec/xapi-storage-script/volume/org.xen.xapi.storage.' + sr)
++    mod = importlib.import_module(sr)
++    return mod.Callbacks()
++
++
++class Implementation(xapi.storage.api.v5.datapath.Datapath_skeleton):
++    """
++    Datapath implementation
++    """
++    def activate(self, dbg, uri, domain):
++        callbacks = get_sr_callbacks(dbg, uri)
++        return FspdiskDatapath.activate(dbg, uri, domain, callbacks)
++
++    def attach(self, dbg, uri, domain):
++        callbacks = get_sr_callbacks(dbg, uri)
++        return FspdiskDatapath.attach(dbg, uri, domain, callbacks)
++
++    def deactivate(self, dbg, uri, domain):
++        callbacks = get_sr_callbacks(dbg, uri)
++        return FspdiskDatapath.deactivate(dbg, uri, domain, callbacks)
++
++    def detach(self, dbg, uri, domain):
++        callbacks = get_sr_callbacks(dbg, uri)
++        return FspdiskDatapath.detach(dbg, uri, domain, callbacks)
++
++    def open(self, dbg, uri, domain):
++        callbacks = get_sr_callbacks(dbg, uri)
++        return FspdiskDatapath.epc_open(dbg, uri, domain, callbacks)
++
++    def close(self, dbg, uri):
++        callbacks = get_sr_callbacks(dbg, uri)
++        return FspdiskDatapath.epc_close(dbg, uri, callbacks)
++
++
++if __name__ == "__main__":
++    log.log_call_argv()
++    CMD = xapi.storage.api.v5.datapath.Datapath_commandline(Implementation())
++    CMD_BASE = os.path.basename(sys.argv[0])
++    if CMD_BASE == "Datapath.activate":
++        CMD.activate()
++    elif CMD_BASE == "Datapath.attach":
++        CMD.attach()
++    elif CMD_BASE == "Datapath.close":
++        CMD.close()
++    elif CMD_BASE == "Datapath.deactivate":
++        CMD.deactivate()
++    elif CMD_BASE == "Datapath.detach":
++        CMD.detach()
++    elif CMD_BASE == "Datapath.open":
++        CMD.open()
++    else:
++        raise xapi.storage.api.v5.datapath.Unimplemented(CMD_BASE)
+diff --git a/plugins/datapath/fspdisk/plugin.py b/plugins/datapath/fspdisk/plugin.py
+new file mode 100644
+index 0000000..f971e5d
+--- /dev/null
++++ b/plugins/datapath/fspdisk/plugin.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python
++
++import os
++import sys
++import xapi.storage.api.v5.plugin
++from xapi.storage import log
++
++
++class Implementation(xapi.storage.api.v5.plugin.Plugin_skeleton):
++
++    def query(self, dbg):
++        return {
++            "plugin": "fspdisk",
++            "name": "The QEMU fspdisk user-space datapath plugin",
++            "description": ("This plugin manages and configures xen_9pfs"
++                            " instances backend for FS paths."),
++            "vendor": "Vates",
++            "copyright": "(C) 2021 Vates",
++            "version": "3.0",
++            "required_api_version": "5.0",
++            "features": [],
++            "configuration": {},
++            "required_cluster_stack": []}
++
++
++if __name__ == "__main__":
++    log.log_call_argv()
++    CMD = xapi.storage.api.v5.plugin.Plugin_commandline(Implementation())
++    CMD_BASE = os.path.basename(sys.argv[0])
++    if CMD_BASE == "Plugin.Query":
++        CMD.query()
++    else:
++        raise xapi.storage.api.v5.plugin.Unimplemented(CMD_BASE)
+diff --git a/plugins/volume/org.xen.xapi.storage.fsp/fsp.py b/plugins/volume/org.xen.xapi.storage.fsp/fsp.py
+new file mode 100644
+index 0000000..545e2cb
+--- /dev/null
++++ b/plugins/volume/org.xen.xapi.storage.fsp/fsp.py
+@@ -0,0 +1,7 @@
++import xapi.storage.libs.libcow.callbacks
++
++
++class Callbacks(xapi.storage.libs.libcow.callbacks.Callbacks):
++
++    def getVolumeUriPrefix(self, opq):
++        return "fsp/" + opq + "|"
+diff --git a/plugins/volume/org.xen.xapi.storage.fsp/plugin.py b/plugins/volume/org.xen.xapi.storage.fsp/plugin.py
+new file mode 100644
+index 0000000..1783a10
+--- /dev/null
++++ b/plugins/volume/org.xen.xapi.storage.fsp/plugin.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python
++
++import os
++import sys
++import xapi.storage.api.v5.plugin
++from xapi.storage import log
++
++
++class Implementation(xapi.storage.api.v5.plugin.Plugin_skeleton):
++
++    def diagnostics(self, dbg):
++        return "No diagnostic data to report"
++
++    def query(self, dbg):
++        return {
++            "plugin": "fsp",
++            "name": "fsp Volume plugin",
++            "description": ("This plugin manages FS paths"),
++            "vendor": "None",
++            "copyright": "(C) 2021 Vates",
++            "version": "3.0",
++            "required_api_version": "5.0",
++            "features": [
++                "SR_ATTACH",
++                "SR_DETACH",
++                "SR_CREATE",
++                "VDI_CREATE", # TODO: Create a VDI_IMPORT feature.
++                "VDI_DESTROY",
++                "VDI_ATTACH",
++                "VDI_ATTACH_OFFLINE",
++                "VDI_DETACH",
++                "VDI_ACTIVATE",
++                "VDI_DEACTIVATE",
++                "VDI_UPDATE",
++                "SR_METADATA"],
++            "configuration": {},
++            "required_cluster_stack": []}
++
++
++if __name__ == "__main__":
++    log.log_call_argv()
++    cmd = xapi.storage.api.v5.plugin.Plugin_commandline(Implementation())
++    base = os.path.basename(sys.argv[0])
++    if base == 'Plugin.diagnostics':
++        cmd.diagnostics()
++    elif base == 'Plugin.Query':
++        cmd.query()
++    else:
++        raise xapi.storage.api.v5.plugin.Unimplemented(base)
+diff --git a/plugins/volume/org.xen.xapi.storage.fsp/sr.py b/plugins/volume/org.xen.xapi.storage.fsp/sr.py
+new file mode 100644
+index 0000000..85d77ba
+--- /dev/null
++++ b/plugins/volume/org.xen.xapi.storage.fsp/sr.py
+@@ -0,0 +1,123 @@
++#!/usr/bin/env python
++
++import os
++import os.path
++import sys
++import urlparse
++
++from xapi.storage import log
++from xapi.storage.libs import util
++from xapi.storage.libs.libcow.volume import COWVolume
++import xapi.storage.api.v5.volume
++
++import importlib
++
++
++@util.decorate_all_routines(util.log_exceptions_in_function)
++class Implementation(xapi.storage.api.v5.volume.SR_skeleton):
++    def probe(self, dbg, configuration):
++        return {
++            'srs': [],
++            'uris': []
++        }
++
++    def attach(self, dbg, configuration):
++        uri = configuration['file-uri']
++        log.debug('{}: SR.attach: config={}, uri={}'.format(
++            dbg, configuration, uri))
++
++        sr = urlparse.urlparse(uri).path
++        return sr
++
++    def create(self, dbg, sr_uuid, configuration, name, description):
++        log.debug('{}: SR.create: config={}, sr_uuid={}'.format(
++            dbg, configuration, sr_uuid))
++
++        uri = configuration['file-uri']
++        sr = urlparse.urlparse(uri).path
++        log.debug('{}: SR.create: sr={}'.format(dbg, sr))
++
++        # Create the metadata database
++        importlib.import_module('fsp').Callbacks().create_database(sr)
++
++        meta = {
++            'name': name,
++            'description': description,
++            'uri': uri,
++            'unique_id': sr_uuid,
++            'read_caching': False,
++            'keys': {}
++        }
++        util.update_sr_metadata(dbg, 'file://' + sr, meta)
++
++        return configuration
++
++    def destroy(self, dbg, sr):
++        util.remove_folder_content(sr)
++
++    def detach(self, dbg, sr):
++        # Nothing todo.
++        pass
++
++    def ls(self, dbg, sr):
++        return COWVolume.ls(
++            dbg, sr, importlib.import_module('fsp').Callbacks())
++
++    def set_description(self, dbg, sr, new_description):
++        util.update_sr_metadata(
++            dbg, 'file://' + sr, {'description': new_description})
++
++    def set_name(self, dbg, sr, new_name):
++        util.update_sr_metadata(dbg, 'file://' + sr, {'name': new_name})
++
++    def stat(self, dbg, sr):
++        if not os.path.isdir(sr):
++            raise xapi.storage.api.v5.volume.Sr_not_attached(sr)
++
++        # Just get the filesystem size because this SR is essentially a small
++        # database + symlinks to used paths.
++        # This is an approximation. `overprovision` is ignored.
++        statvfs = os.statvfs(sr)
++        psize = statvfs.f_blocks * statvfs.f_frsize
++        fsize = statvfs.f_bfree * statvfs.f_frsize
++        log.debug('{}: statvfs says psize = {}'.format(dbg, psize))
++
++        meta = util.get_sr_metadata(dbg, 'file://' + sr)
++        return {
++            'sr': sr,
++            'name': meta['name'],
++            'description': meta['description'],
++            'total_space': psize,
++            'free_space': fsize,
++            'uuid': meta['unique_id'],
++            'overprovision': 0,
++            'datasources': [],
++            'clustered': True,
++            'health': ['Healthy', '']
++        }
++
++
++if __name__ == '__main__':
++    log.log_call_argv()
++    cmd = xapi.storage.api.v5.volume.SR_commandline(Implementation())
++    base = os.path.basename(sys.argv[0])
++    if base == 'SR.probe':
++        cmd.probe()
++    elif base == 'SR.attach':
++        cmd.attach()
++    elif base == 'SR.create':
++        cmd.create()
++    elif base == 'SR.destroy':
++        cmd.destroy()
++    elif base == 'SR.detach':
++        cmd.detach()
++    elif base == 'SR.ls':
++        cmd.ls()
++    elif base == 'SR.set_description':
++        cmd.set_description()
++    elif base == 'SR.set_name':
++        cmd.set_name()
++    elif base == 'SR.stat':
++        cmd.stat()
++    else:
++        raise xapi.storage.api.v5.volume.Unimplemented(base)
+diff --git a/plugins/volume/org.xen.xapi.storage.fsp/volume.py b/plugins/volume/org.xen.xapi.storage.fsp/volume.py
+new file mode 100644
+index 0000000..d03845d
+--- /dev/null
++++ b/plugins/volume/org.xen.xapi.storage.fsp/volume.py
+@@ -0,0 +1,96 @@
++#!/usr/bin/env python
++
++import importlib
++import os
++import sys
++import urlparse
++import uuid
++import xapi.storage.api.v5.volume
++
++from xapi.storage import log
++from xapi.storage.libs import util
++from xapi.storage.libs.libcow.callbacks import VolumeContext
++from xapi.storage.libs.libcow.imageformat import ImageFormat
++from xapi.storage.libs.libcow.lock import PollLock
++from xapi.storage.libs.libcow.volume_implementation import Implementation as \
++    DefaultImplementation
++
++
++@util.decorate_all_routines(util.log_exceptions_in_function)
++class Implementation(DefaultImplementation):
++    def create(self, dbg, sr, name, description, size, sharable):
++        # WORKAROUND: For the moment we can't use a config param to forward the
++        # shared_dir string. We use the name field instead.
++        # We must open few PRs in the upstream repositories to support that:
++        # - xenopsd
++        # - xapi-storage-script
++        #
++        # TODO: The VDI size is useless. So it would be more interesting to add
++        # a VDI.import method instead of using VDI.create.
++
++        shared_dir = os.path.normpath(urlparse.urlparse(name).path)
++        if not shared_dir or shared_dir == '.':
++            raise ValueError('shared_dir param is empty')
++        if not os.path.isdir(shared_dir):
++            raise ValueError('shared_dir param is not a valid directory')
++
++        statvfs = os.statvfs(os.path.realpath(shared_dir))
++        psize = statvfs.f_blocks * statvfs.f_frsize
++
++        with VolumeContext(self.callbacks, sr, 'w') as opq:
++            image_type = ImageFormat.IMAGE_DIRECTORY
++            image_format = ImageFormat.get_format(image_type)
++            vdi_uuid = str(uuid.uuid4())
++
++            with PollLock(opq, 'gl', self.callbacks, 0.5):
++                with self.callbacks.db_context(opq) as db:
++                    volume = db.insert_new_volume(psize, image_type)
++                    db.insert_vdi(
++                        name, description, vdi_uuid, volume.id, sharable)
++                    volume_path = self.callbacks.volumeGetPath(
++                        opq, str(volume.id))
++            os.symlink(shared_dir, volume_path)
++
++            vdi_uri = self.callbacks.getVolumeUriPrefix(opq) + vdi_uuid
++
++        return {
++            'key': vdi_uuid,
++            'uuid': vdi_uuid,
++            'name': name,
++            'description': description,
++            'read_write': True,
++            'virtual_size': psize,
++            'physical_utilisation': 0,
++            'uri': [image_format.uri_prefix + vdi_uri],
++            'sharable': sharable,
++            'keys': {}
++        }
++
++
++def call_volume_command():
++    """Parse the arguments and call the required command"""
++    log.log_call_argv()
++    fsp = importlib.import_module("fsp")
++    cmd = xapi.storage.api.v5.volume.Volume_commandline(
++        Implementation(fsp.Callbacks()))
++    base = os.path.basename(sys.argv[0])
++    if base == "Volume.create":
++        cmd.create()
++    elif base == "Volume.destroy":
++        cmd.destroy()
++    elif base == "Volume.set":
++        cmd.set()
++    elif base == "Volume.set_description":
++        cmd.set_description()
++    elif base == "Volume.set_name":
++        cmd.set_name()
++    elif base == "Volume.stat":
++        cmd.stat()
++    elif base == "Volume.unset":
++        cmd.unset()
++    else:
++        raise xapi.storage.api.v5.volume.Unimplemented(base)
++
++
++if __name__ == "__main__":
++    call_volume_command()
+diff --git a/xapi/storage/libs/image.py b/xapi/storage/libs/image.py
+index b82d2ad..e8ff32f 100644
+--- a/xapi/storage/libs/image.py
++++ b/xapi/storage/libs/image.py
+@@ -37,3 +37,17 @@ class Raw(Path):
+ 
+     def __str__(self):
+         return "aio:" + self.path
++
++
++class Directory(Path):
++
++    """An entity on the filesystem in directory format"""
++
++    def __init__(self, path):
++        Path.__init__(self, path)
++
++    def format(self):
++        return "dir"
++
++    def __str__(self):
++        return "dir:" + self.path
+diff --git a/xapi/storage/libs/libcow/datapath.py b/xapi/storage/libs/libcow/datapath.py
+index ff8e8fd..c942004 100644
+--- a/xapi/storage/libs/libcow/datapath.py
++++ b/xapi/storage/libs/libcow/datapath.py
+@@ -1,4 +1,5 @@
+ from __future__ import absolute_import
++import os
+ import sys
+ import urlparse
+ 
+@@ -14,12 +15,12 @@ vdi_enable_intellicache = False
+ 
+ 
+ class COWDatapath(object):
+-    @staticmethod
+-    def parse_uri(uri):
++    @classmethod
++    def parse_uri(cls, uri):
+         raise NotImplementedError('Override in dp specifc class')
+ 
+-    @staticmethod
+-    def attach_internal(dbg, opq, vdi, vol_path, cb):
++    @classmethod
++    def attach_internal(cls, dbg, opq, vdi, vol_path, cb):
+         raise NotImplementedError('Override in dp specifc class')
+ 
+     @classmethod
+@@ -35,12 +36,14 @@ class COWDatapath(object):
+             'implementations': cls.attach_internal(dbg, opq, vdi, vol_path, cb)
+         }
+ 
+-    @staticmethod
+-    def activate_internal(dbg, opq, vdi, img, cb):
++    @classmethod
++    def activate_internal(cls, dbg, opq, vdi, img, cb):
+         raise NotImplementedError('Override in dp specifc class')
+ 
+     @staticmethod
+     def _get_image_from_vdi(vdi, vol_path):
++        if os.path.isdir(vol_path):
++            return image.Directory(vol_path)
+         if vdi.sharable or util.is_block_device(vol_path):
+             return image.Raw(vol_path)
+         return image.Cow(vol_path)
+@@ -69,8 +72,8 @@ class COWDatapath(object):
+                         log.debug('{}: activate_internal failed'.format(dbg))
+                         raise
+ 
+-    @staticmethod
+-    def deactivate_internal(dbg, opq, vdi, img, cb):
++    @classmethod
++    def deactivate_internal(cls, dbg, opq, vdi, img, cb):
+         raise NotImplementedError('Override in dp specifc class')
+ 
+     @classmethod
+@@ -90,8 +93,8 @@ class COWDatapath(object):
+                     except:
+                         log.debug('{}: deactivate_internal failed'.format(dbg))
+ 
+-    @staticmethod
+-    def detach_internal(dbg, opq, vdi, cb):
++    @classmethod
++    def detach_internal(cls, dbg, opq, vdi, cb):
+         raise NotImplementedError('Override in dp specifc class')
+ 
+     @classmethod
+@@ -188,15 +191,15 @@ class TapdiskDatapath(COWDatapath):
+     Datapath handler for tapdisk
+     """
+ 
+-    @staticmethod
+-    def parse_uri(uri):
++    @classmethod
++    def parse_uri(cls, uri):
+         # uri will be like:
+         # "tapdisk://<sr-type>/<sr-mount-or-volume-group>|<volume-name>"
+         mount_or_vg, name = urlparse.urlparse(uri).path.split('|')
+         return ('vhd:///' + mount_or_vg, name)
+ 
+-    @staticmethod
+-    def attach_internal(dbg, opq, vdi, vol_path, cb):
++    @classmethod
++    def attach_internal(cls, dbg, opq, vdi, vol_path, cb):
+         if vdi.volume.parent_id is not None and vdi_enable_intellicache:
+             parent_cow_path = cb.volumeGetPath(opq, str(vdi.volume.parent_id))
+             IntelliCache.attach(
+@@ -220,8 +223,8 @@ class TapdiskDatapath(COWDatapath):
+             }]
+         ]
+ 
+-    @staticmethod
+-    def activate_internal(dbg, opq, vdi, img, cb):
++    @classmethod
++    def activate_internal(cls, dbg, opq, vdi, img, cb):
+         if vdi.volume.parent_id is not None and vdi_enable_intellicache:
+             parent_cow_path = cb.volumeGetPath(
+                 opq,
+@@ -243,8 +246,8 @@ class TapdiskDatapath(COWDatapath):
+             tapdisk.save_tapdisk_metadata(
+                 dbg, vdi_meta_path, tap)
+ 
+-    @staticmethod
+-    def deactivate_internal(dbg, opq, vdi, img, cb):
++    @classmethod
++    def deactivate_internal(cls, dbg, opq, vdi, img, cb):
+         """
+         Do the tapdisk specific deactivate
+         """
+@@ -258,8 +261,8 @@ class TapdiskDatapath(COWDatapath):
+                 dbg, cb.get_data_metadata_path(opq, vdi.uuid))
+             tap.close(dbg)
+ 
+-    @staticmethod
+-    def detach_internal(dbg, opq, vdi, cb):
++    @classmethod
++    def detach_internal(cls, dbg, opq, vdi, cb):
+         if vdi.volume.parent_id is not None and vdi_enable_intellicache:
+             parent_cow_path = cb.volumeGetPath(
+                 opq, str(vdi.volume.parent_id))
+@@ -272,21 +275,21 @@ class TapdiskDatapath(COWDatapath):
+             tapdisk.forget_tapdisk_metadata(dbg, vdi_meta_path)
+ 
+ 
+-class QdiskDatapath(COWDatapath):
+-    """
+-    Datapath handler for qdisk
+-    """
+-
++class QdiskAbstractDatapath(COWDatapath):
+     @staticmethod
+-    def parse_uri(uri):
++    def driver_type():
++        raise NotImplementedError('Override in dp specifc class')
++
++    @classmethod
++    def parse_uri(cls, uri):
+         # uri will be like:
+-        # "qdisk://<sr-type>/<sr-mount-or-volume-group>|<volume-name>"
++        # "<driver_type>://<sr-type>/<sr-mount-or-volume-group>|<volume-name>"
+         mount_or_vg, name = urlparse.urlparse(uri).path.split('|')
+-        return ('qcow2:///' + mount_or_vg, name)
++        return (cls.driver_type() + ':///' + mount_or_vg, name)
+ 
+-    @staticmethod
+-    def attach_internal(dbg, opq, vdi, vol_path, cb):
+-        log.debug("attach: doing qcow2 attach")
++    @classmethod
++    def attach_internal(cls, dbg, opq, vdi, vol_path, cb):
++        log.debug('detach: doing {} attach'.format(cls.driver_type()))
+         # spawn an upstream qemu as a standalone backend
+         qemu_be = qemudisk.create(dbg, vdi.uuid)
+         log.debug("attach: created %s" % qemu_be)
+@@ -297,24 +300,36 @@ class QdiskDatapath(COWDatapath):
+         log.debug("attach: saved metadata with %s, %s" %
+                   (cb.get_data_metadata_path(opq, vdi.uuid), qemu_be))
+ 
++        if cls.driver_type() == 'qcow2':
++            return [
++                ['XenDisk', {
++                    'backend_type': 'qdisk',
++                    'params': "vdi:{}".format(vdi.uuid),
++                    'extra': {}
++                }],
++                ['Nbd', {
++                    'uri': 'nbd:unix:{}:exportname={}'.format(
++                        qemu_be.nbd_unix_sock, qemudisk.LEAF_NODE_NAME
++                    )
++                }]
++            ]
++
+         return [
+             ['XenDisk', {
+-                'backend_type': 'qdisk',
+-                'params': "vdi:{}".format(vdi.uuid),
++                'backend_type': '9pfs',
++                'params': "vdi:{} {} none {}".format(
++                    vdi.uuid, 'share_dir', vol_path
++                ),
+                 'extra': {}
+-            }],
+-            ['Nbd', {
+-                'uri': 'nbd:unix:{}:exportname={}'.format(
+-                    qemu_be.nbd_unix_sock, qemudisk.LEAF_NODE_NAME
+-                )
+             }]
+         ]
+ 
+-    @staticmethod
+-    def activate_internal(dbg, opq, vdi, img, cb):
++    @classmethod
++    def activate_internal(cls, dbg, opq, vdi, img, cb):
+         log.debug(
+-            "activate: doing qcow2 activate with img '%s'"
+-            % (img))
++            'deactivate: doing {} activate with img \'{}\''
++            .format(cls.driver_type(), img)
++        )
+         vdi_meta_path = cb.get_data_metadata_path(opq, vdi.uuid)
+         qemu_be = qemudisk.load_qemudisk_metadata(
+             dbg, vdi_meta_path)
+@@ -323,14 +338,12 @@ class QdiskDatapath(COWDatapath):
+                                         vdi_meta_path,
+                                         qemu_be)
+ 
+-    @staticmethod
+-    def deactivate_internal(dbg, opq, vdi, img, cb):
+-        """
+-        Do the qdisk specific deactivate
+-        """
++    @classmethod
++    def deactivate_internal(cls, dbg, opq, vdi, img, cb):
+         log.debug(
+-            "deactivate: doing qcow2 deactivate with img '%s'"
+-            % (img))
++            'deactivate: doing {} deactivate with img \'{}\''
++            .format(cls.driver_type(), img)
++        )
+         qemu_be = qemudisk.load_qemudisk_metadata(
+             dbg, cb.get_data_metadata_path(opq, vdi.uuid))
+         qemu_be.close(dbg, vdi.uuid, img)
+@@ -339,9 +352,29 @@ class QdiskDatapath(COWDatapath):
+                                         metadata_path,
+                                         qemu_be)
+ 
+-    @staticmethod
+-    def detach_internal(dbg, opq, vdi, cb):
+-        log.debug("detach: find and kill the qemu")
++    @classmethod
++    def detach_internal(cls, dbg, opq, vdi, cb):
++        log.debug('detach: doing {} detach'.format(cls.driver_type()))
+         vdi_meta_path = cb.get_data_metadata_path(opq, vdi.uuid)
+         qemu_be = qemudisk.load_qemudisk_metadata(dbg, vdi_meta_path)
+         qemu_be.quit(dbg, vdi.uuid)
++
++
++class QdiskDatapath(QdiskAbstractDatapath):
++    """
++    Datapath handler for qdisk
++    """
++
++    @staticmethod
++    def driver_type():
++        return 'qcow2'
++
++
++class FspdiskDatapath(QdiskAbstractDatapath):
++    """
++    Datapath handler for fspdisk
++    """
++
++    @staticmethod
++    def driver_type():
++        return '9pfs'
+diff --git a/xapi/storage/libs/libcow/fsputil.py b/xapi/storage/libs/libcow/fsputil.py
+new file mode 100644
+index 0000000..bf992f8
+--- /dev/null
++++ b/xapi/storage/libs/libcow/fsputil.py
+@@ -0,0 +1,14 @@
++import os
++
++from xapi.storage.libs.libcow.cowutil import COWUtil
++
++
++class FSPUtil(COWUtil):
++    @staticmethod
++    def get_vsize(dbg, vol_path):
++        statvfs = os.statvfs(vol_path)
++        return statvfs.f_blocks * statvfs.f_frsize
++
++    @staticmethod
++    def getImgFormat(dbg):
++        return '9pfs'
+diff --git a/xapi/storage/libs/libcow/imageformat.py b/xapi/storage/libs/libcow/imageformat.py
+index a2fea54..2253407 100644
+--- a/xapi/storage/libs/libcow/imageformat.py
++++ b/xapi/storage/libs/libcow/imageformat.py
+@@ -1,6 +1,7 @@
+ """
+ Map image formats to datapath URIs and tools
+ """
++from .fsputil import FSPUtil
+ from .qcow2util import QCOW2Util
+ from .rawutil import RawUtil
+ from .vhdutil import VHDUtil
+@@ -13,6 +14,7 @@ class ImageFormat(object):
+     IMAGE_RAW = 0
+     IMAGE_VHD = 1
+     IMAGE_QCOW2 = 2
++    IMAGE_DIRECTORY = 3
+ 
+     _formats = None
+ 
+@@ -37,7 +39,8 @@ class ImageFormat(object):
+         return {
+             cls.IMAGE_RAW: ImageFormat('tapdisk://', RawUtil),
+             cls.IMAGE_VHD: ImageFormat('tapdisk://', VHDUtil),
+-            cls.IMAGE_QCOW2: ImageFormat('qdisk://', QCOW2Util)
++            cls.IMAGE_QCOW2: ImageFormat('qdisk://', QCOW2Util),
++            cls.IMAGE_DIRECTORY: ImageFormat('fspdisk://', FSPUtil)
+         }
+ 
+     @classmethod
+diff --git a/xapi/storage/libs/qemudisk.py b/xapi/storage/libs/qemudisk.py
+index 6ba846e..3c34631 100644
+--- a/xapi/storage/libs/qemudisk.py
++++ b/xapi/storage/libs/qemudisk.py
+@@ -89,24 +89,26 @@ class Qemudisk(object):
+             args['backing'] = None
+         self._qmp_command(dbg, "blockdev-add", **args)
+ 
+-    def open(self, dbg, key, f):
++    def open(self, dbg, key, image):
+         # FIXME: this would not work for raw support
+         # assert isinstance(f, image.Cow)
+         log.debug("%s: opening image %s in qemu with sock %s" %
+-                  (dbg, f, self.qmp_sock))
+-        self.f = f.path
+-        self._qmp_connect(dbg)
+-        # FIXME: we can not hardcode qcow2 here
+-        # args = {"driver": "raw",
+-        self._blockdev_add(dbg, self.f, LEAF_NODE_NAME)
+-
+-        # Start an NBD server exposing this blockdev
+-        self._qmp_command(dbg, "nbd-server-start",
+-                          addr={'type': 'unix',
+-                                'data': {'path': self.nbd_unix_sock}})
+-        self._qmp_command(dbg, "nbd-server-add",
+-                          device=LEAF_NODE_NAME, writable=True)
+-        self._qmp_disconnect(dbg)
++                  (dbg, image, self.qmp_sock))
++        self.f = image.path
++
++        if image.format() != 'dir':
++            self._qmp_connect(dbg)
++            # FIXME: we can not hardcode qcow2 here
++            # args = {"driver": "raw",
++            self._blockdev_add(dbg, self.f, LEAF_NODE_NAME)
++
++            # Start an NBD server exposing this blockdev
++            self._qmp_command(dbg, "nbd-server-start",
++                              addr={'type': 'unix',
++                                    'data': {'path': self.nbd_unix_sock}})
++            self._qmp_command(dbg, "nbd-server-add",
++                              device=LEAF_NODE_NAME, writable=True)
++            self._qmp_disconnect(dbg)
+ 
+     def _kill_qemu(self):
+         try:
+@@ -117,11 +119,11 @@ class Qemudisk(object):
+         except (psutil.NoSuchProcess, psutil.AccessDenied):
+             pass
+ 
+-    def close(self, dbg, key, f):
++    def close(self, dbg, key, image):
+         # FIXME: this would not work for raw support
+-        # assert isinstance(f, image.Cow)
++        # assert isinstance(image, image.Cow)
+         log.debug("%s: closing image %s in qemu with sock %s" %
+-                  (dbg, f, self.qmp_sock))
++                  (dbg, image, self.qmp_sock))
+ 
+         try:
+             self._qmp_connect(dbg)
+@@ -139,12 +141,13 @@ class Qemudisk(object):
+             except:
+                 log.debug('No VBD found')
+ 
+-            # Stop the NBD server
+-            self._qmp_command(dbg, "nbd-server-stop")
++            if image.format() != 'dir':
++                # Stop the NBD server
++                self._qmp_command(dbg, "nbd-server-stop")
+ 
+-            # Remove the block device
+-            args = {"node-name": LEAF_NODE_NAME}
+-            self._qmp_command(dbg, "blockdev-del", **args)
++                # Remove the block device
++                args = {"node-name": LEAF_NODE_NAME}
++                self._qmp_command(dbg, "blockdev-del", **args)
+             self._qmp_disconnect(dbg)
+         except Exception as e:
+             log.debug('{}: failed to close qemu: {}'.format(dbg, e))
+-- 
+2.38.1
+
