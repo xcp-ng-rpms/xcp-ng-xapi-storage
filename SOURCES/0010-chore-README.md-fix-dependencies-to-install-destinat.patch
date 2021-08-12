@@ -1,0 +1,41 @@
+From 2b11b2c25752d5c7612a4b06ab29c682d531a941 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Wed, 5 May 2021 11:23:56 +0200
+Subject: [PATCH 10/11] chore(README.md): fix dependencies to install +
+ destination directory + systemctl reload
+
+---
+ README.md | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/README.md b/README.md
+index 4045167..c6ade22 100644
+--- a/README.md
++++ b/README.md
+@@ -17,20 +17,21 @@ Datapath plugins are named by URI schemes. Internally we have the following low-
+ 
+ ## Build & installation
+ 
+-Install dependencies: `make3`, `make`, `python-setuptools`, `nbd`, `python-psutil`, `qemu-dp`, `systemd` and `xapi-storage`.
++Install dependencies: `cmake3`, `make`, `python-setuptools`, `nbd`, `python-psutil`, `qemu-dp`, `systemd` and `xapi-storage`.
+ 
+ Run these commands in the project directory:
+ 
+ ```bash
+ mkdir build
+ cd build
+-cmake ..
++cmake3 .. -DCMAKE_INSTALL_PREFIX=/usr
+ make install
+ ```
+ 
+ Do not forget to start qemuback service after installation:
+ 
+ ```
++systemctl daemon-reload
+ systemctl start qemuback.service
+ ```
+ 
+-- 
+2.32.0
+

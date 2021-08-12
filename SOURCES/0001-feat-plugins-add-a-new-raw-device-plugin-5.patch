@@ -1,0 +1,599 @@
+From 3fd6c20aaab24dc15bd00a57ab029d8c868ccba7 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@gmail.com>
+Date: Mon, 23 Sep 2019 10:16:10 +0200
+Subject: [PATCH 01/11] feat(plugins): add a new raw-device plugin (#5)
+
+---
+ CMakeLists.txt                                |   1 +
+ .../org.xen.xapi.storage.raw-device/plugin.py |  48 ++++++
+ .../raw-device.py                             |   6 +
+ .../org.xen.xapi.storage.raw-device/sr.py     | 138 ++++++++++++++++++
+ .../org.xen.xapi.storage.raw-device/volume.py | 101 +++++++++++++
+ xapi/storage/libs/image.py                    |   1 +
+ xapi/storage/libs/libcow/callbacks.py         |   3 +-
+ xapi/storage/libs/libcow/datapath.py          |  25 ++--
+ xapi/storage/libs/libcow/imageformat.py       |   3 +-
+ xapi/storage/libs/libcow/metabase.py          |  12 ++
+ xapi/storage/libs/libcow/rawutil.py           |  13 +-
+ xapi/storage/libs/libcow/volume.py            |   9 ++
+ .../libs/libcow/volume_implementation.py      |   1 -
+ xapi/storage/libs/util.py                     |  28 ++++
+ 14 files changed, 370 insertions(+), 19 deletions(-)
+ create mode 100644 plugins/volume/org.xen.xapi.storage.raw-device/plugin.py
+ create mode 100644 plugins/volume/org.xen.xapi.storage.raw-device/raw-device.py
+ create mode 100644 plugins/volume/org.xen.xapi.storage.raw-device/sr.py
+ create mode 100644 plugins/volume/org.xen.xapi.storage.raw-device/volume.py
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1d99c75..6d676db 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -39,6 +39,7 @@ set(VOLUME_PLUGINS
+   org.xen.xapi.storage.ext4-ng
+   org.xen.xapi.storage.filebased
+   org.xen.xapi.storage.nfs-ng
++  org.xen.xapi.storage.raw-device
+ )
+ 
+ set(LIBS_TASKS
+diff --git a/plugins/volume/org.xen.xapi.storage.raw-device/plugin.py b/plugins/volume/org.xen.xapi.storage.raw-device/plugin.py
+new file mode 100644
+index 0000000..c35af4c
+--- /dev/null
++++ b/plugins/volume/org.xen.xapi.storage.raw-device/plugin.py
+@@ -0,0 +1,48 @@
++#!/usr/bin/env python
++
++import os
++import sys
++import xapi.storage.api.v5.plugin
++from xapi.storage import log
++
++
++class Implementation(xapi.storage.api.v5.plugin.Plugin_skeleton):
++    def diagnostics(self, dbg):
++        return "No diagnostic data to report"
++
++    def query(self, dbg):
++        return {
++            "plugin": "raw-device",
++            "name": "raw-device Volume plugin",
++            "description": ("This plugin manages a raw-device based SR"),
++            "vendor": "None",
++            "copyright": "(C) 2019 Vates",
++            "version": "1.0",
++            "required_api_version": "5.0",
++            "features": [
++                "SR_ATTACH",
++                "SR_DETACH",
++                "SR_CREATE",
++                "VDI_CREATE",
++                "VDI_DESTROY",
++                "VDI_ATTACH",
++                "VDI_ATTACH_OFFLINE",
++                "VDI_DETACH",
++                "VDI_ACTIVATE",
++                "VDI_DEACTIVATE",
++                "VDI_UPDATE",
++                "SR_METADATA"],
++            "configuration": {},
++            "required_cluster_stack": []}
++
++
++if __name__ == "__main__":
++    log.log_call_argv()
++    cmd = xapi.storage.api.v5.plugin.Plugin_commandline(Implementation())
++    base = os.path.basename(sys.argv[0])
++    if base == 'Plugin.diagnostics':
++        cmd.diagnostics()
++    elif base == 'Plugin.Query':
++        cmd.query()
++    else:
++        raise xapi.storage.api.v5.plugin.Unimplemented(base)
+diff --git a/plugins/volume/org.xen.xapi.storage.raw-device/raw-device.py b/plugins/volume/org.xen.xapi.storage.raw-device/raw-device.py
+new file mode 100644
+index 0000000..7fd2db8
+--- /dev/null
++++ b/plugins/volume/org.xen.xapi.storage.raw-device/raw-device.py
+@@ -0,0 +1,6 @@
++import xapi.storage.libs.libcow.callbacks
++
++
++class Callbacks(xapi.storage.libs.libcow.callbacks.Callbacks):
++    def getVolumeUriPrefix(self, opq):
++        return "raw-device/" + opq + "|"
+diff --git a/plugins/volume/org.xen.xapi.storage.raw-device/sr.py b/plugins/volume/org.xen.xapi.storage.raw-device/sr.py
+new file mode 100644
+index 0000000..03c208d
+--- /dev/null
++++ b/plugins/volume/org.xen.xapi.storage.raw-device/sr.py
+@@ -0,0 +1,138 @@
++#!/usr/bin/env python
++
++import importlib
++import os
++import os.path
++import sys
++import urlparse
++
++from xapi.storage import log
++from xapi.storage.libs import util
++from xapi.storage.libs.libcow.coalesce import COWCoalesce
++from xapi.storage.libs.libcow.volume import COWVolume
++import xapi.storage.api.v5.volume
++
++
++@util.decorate_all_routines(util.log_exceptions_in_function)
++class Implementation(xapi.storage.api.v5.volume.SR_skeleton):
++    def probe(self, dbg, configuration):
++        return {
++            'srs': [],
++            'uris': []
++        }
++
++    def attach(self, dbg, configuration):
++        uri = configuration['file-uri']
++        log.debug('{}: SR.attach: config={}, uri={}'.format(
++            dbg, configuration, uri))
++
++        sr = urlparse.urlparse(uri).path
++
++        # Start GC for this host
++        COWCoalesce.start_gc(dbg, 'raw-device', sr)
++
++        return sr
++
++    def create(self, dbg, sr_uuid, configuration, name, description):
++        log.debug('{}: SR.create: config={}, sr_uuid={}'.format(
++            dbg, configuration, sr_uuid))
++
++        uri = configuration['file-uri']
++        sr = urlparse.urlparse(uri).path
++        log.debug('{}: SR.create: sr={}'.format(dbg, sr))
++
++        # Create the metadata database
++        importlib.import_module('raw-device').Callbacks().create_database(sr)
++
++        read_caching = True
++        if 'read_caching' in configuration:
++            if configuration['read_caching'] not in [
++                    'true', 't', 'on', '1', 'yes']:
++                read_caching = False
++
++        meta = {
++            'name': name,
++            'description': description,
++            'uri': uri,
++            'unique_id': sr_uuid,
++            'read_caching': read_caching,
++            'keys': {},
++            'devices': [x.strip() for x in configuration['devices'].split(',')]
++        }
++        util.update_sr_metadata(dbg, 'file://' + sr, meta)
++
++        return configuration
++
++    def destroy(self, dbg, sr):
++        self.detach(dbg, sr)
++        util.remove_folder_content(sr)
++
++    def detach(self, dbg, sr):
++        # stop GC
++        try:
++            COWCoalesce.stop_gc(dbg, 'raw-device', sr)
++        except:
++            log.debug('GC already stopped')
++
++    def ls(self, dbg, sr):
++        return COWVolume.ls(
++            dbg, sr, importlib.import_module('raw-device').Callbacks())
++
++    def set_description(self, dbg, sr, new_description):
++        util.update_sr_metadata(
++            dbg, 'file://' + sr, {'description': new_description})
++
++    def set_name(self, dbg, sr, new_name):
++        util.update_sr_metadata(dbg, 'file://' + sr, {'name': new_name})
++
++    def stat(self, dbg, sr):
++        if not os.path.isdir(sr):
++            raise xapi.storage.api.v5.volume.Sr_not_attached(sr)
++
++        devices = util.get_sr_metadata(dbg, 'file://' + sr)['devices']
++        total_size = 0
++        for device in map(lambda x: os.path.realpath(x), devices):
++            total_size += util.get_physical_file_size(device)
++
++        used_size = COWVolume.get_sr_provisioned_size(
++            sr, importlib.import_module('raw-device').Callbacks())
++
++        meta = util.get_sr_metadata(dbg, 'file://' + sr)
++        return {
++            'sr': sr,
++            'name': meta['name'],
++            'description': meta['description'],
++            'total_space': total_size,
++            'free_space': total_size - used_size,
++            'uuid': meta['unique_id'],
++            'overprovision': used_size,
++            'datasources': [],
++            'clustered': True,
++            'health': ['Healthy', '']
++        }
++
++
++if __name__ == '__main__':
++    log.log_call_argv()
++    cmd = xapi.storage.api.v5.volume.SR_commandline(Implementation())
++    base = os.path.basename(sys.argv[0])
++    if base == 'SR.probe':
++        cmd.probe()
++    elif base == 'SR.attach':
++        cmd.attach()
++    elif base == 'SR.create':
++        cmd.create()
++    elif base == 'SR.destroy':
++        cmd.destroy()
++    elif base == 'SR.detach':
++        cmd.detach()
++    elif base == 'SR.ls':
++        cmd.ls()
++    elif base == 'SR.set_description':
++        cmd.set_description()
++    elif base == 'SR.set_name':
++        cmd.set_name()
++    elif base == 'SR.stat':
++        cmd.stat()
++    else:
++        raise xapi.storage.api.v5.volume.Unimplemented(base)
+diff --git a/plugins/volume/org.xen.xapi.storage.raw-device/volume.py b/plugins/volume/org.xen.xapi.storage.raw-device/volume.py
+new file mode 100644
+index 0000000..6d905c5
+--- /dev/null
++++ b/plugins/volume/org.xen.xapi.storage.raw-device/volume.py
+@@ -0,0 +1,101 @@
++#!/usr/bin/env python
++
++import importlib
++import os
++import sys
++import uuid
++import xapi.storage.api.v5.volume
++
++from xapi.storage import log
++from xapi.storage.libs import util
++from xapi.storage.libs.libcow.callbacks import VolumeContext
++from xapi.storage.libs.libcow.imageformat import ImageFormat
++from xapi.storage.libs.libcow.lock import PollLock
++from xapi.storage.libs.libcow.volume_implementation import Implementation as \
++    DefaultImplementation
++
++
++@util.decorate_all_routines(util.log_exceptions_in_function)
++class Implementation(DefaultImplementation):
++    def create(self, dbg, sr, name, description, size, sharable):
++        devices = util.get_sr_metadata(dbg, 'file://' + sr)['devices']
++        devices = map(lambda x: os.path.realpath(x), devices)
++
++        with VolumeContext(self.callbacks, sr, 'w') as opq:
++            image_type = ImageFormat.IMAGE_RAW
++            image_format = ImageFormat.get_format(image_type)
++            vdi_uuid = str(uuid.uuid4())
++
++            with PollLock(opq, 'gl', self.callbacks, 0.5):
++                with self.callbacks.db_context(opq) as db:
++                    # List all used devices.
++                    used_devices = map(
++                        lambda x: os.path.realpath(
++                           self.callbacks.volumeGetPath(opq, str(x.id))),
++                        db.get_all_volumes())
++
++                    # Find first free device with the best size.
++                    free_device = None
++                    psize = sys.maxint
++                    for device in devices:
++                        if device not in used_devices:
++                            device_size = util.get_physical_file_size(device)
++                            if device_size >= size and device_size < psize:
++                                free_device = device
++                                psize = device_size
++
++                    if not free_device:
++                        # TODO: Maybe find a better exception.
++                        raise ValueError('No free device found in config')
++
++                    volume = db.insert_new_volume(psize, image_type)
++                    db.insert_vdi(
++                        name, description, vdi_uuid, volume.id, sharable)
++                    volume_path = self.callbacks.volumeGetPath(
++                        opq, str(volume.id))
++            os.symlink(free_device, volume_path)
++
++            vdi_uri = self.callbacks.getVolumeUriPrefix(opq) + vdi_uuid
++
++        return {
++            'key': vdi_uuid,
++            'uuid': vdi_uuid,
++            'name': name,
++            'description': description,
++            'read_write': True,
++            'virtual_size': psize,
++            'physical_utilisation': psize,
++            'uri': [image_format.uri_prefix + vdi_uri],
++            'sharable': sharable,
++            'keys': {}
++        }
++
++
++def call_volume_command():
++    """Parse the arguments and call the required command"""
++    log.log_call_argv()
++    cmd = xapi.storage.api.v5.volume.Volume_commandline(
++        Implementation(importlib.import_module('raw-device').Callbacks()))
++    base = os.path.basename(sys.argv[0])
++    if base == "Volume.clone":
++        cmd.clone()
++    elif base == "Volume.create":
++        cmd.create()
++    elif base == "Volume.destroy":
++        cmd.destroy()
++    elif base == "Volume.set":
++        cmd.set()
++    elif base == "Volume.set_description":
++        cmd.set_description()
++    elif base == "Volume.set_name":
++        cmd.set_name()
++    elif base == "Volume.stat":
++        cmd.stat()
++    elif base == "Volume.unset":
++        cmd.unset()
++    else:
++        raise xapi.storage.api.v5.volume.Unimplemented(base)
++
++
++if __name__ == "__main__":
++    call_volume_command()
+diff --git a/xapi/storage/libs/image.py b/xapi/storage/libs/image.py
+index e3205be..b82d2ad 100644
+--- a/xapi/storage/libs/image.py
++++ b/xapi/storage/libs/image.py
+@@ -17,6 +17,7 @@ class Cow(Path):
+     def __init__(self, path):
+         Path.__init__(self, path)
+ 
++    # FIXME: Why vhd and not qcow2?
+     def format(self):
+         return "vhd"
+ 
+diff --git a/xapi/storage/libs/libcow/callbacks.py b/xapi/storage/libs/libcow/callbacks.py
+index 52fb90c..601538d 100644
+--- a/xapi/storage/libs/libcow/callbacks.py
++++ b/xapi/storage/libs/libcow/callbacks.py
+@@ -133,8 +133,7 @@ class Callbacks(object):
+         pass
+ 
+     def volumeGetPhysSize(self, opq, name):
+-        stat = os.stat(self._get_volume_path(opq, name))
+-        return stat.st_blocks * 512
++        return util.get_physical_file_size(self._get_volume_path(opq, name))
+ 
+     def volumeStartOperations(self, sr, mode):
+         return urlparse.urlparse(sr).path
+diff --git a/xapi/storage/libs/libcow/datapath.py b/xapi/storage/libs/libcow/datapath.py
+index d86d705..ff8e8fd 100644
+--- a/xapi/storage/libs/libcow/datapath.py
++++ b/xapi/storage/libs/libcow/datapath.py
+@@ -39,6 +39,12 @@ class COWDatapath(object):
+     def activate_internal(dbg, opq, vdi, img, cb):
+         raise NotImplementedError('Override in dp specifc class')
+ 
++    @staticmethod
++    def _get_image_from_vdi(vdi, vol_path):
++        if vdi.sharable or util.is_block_device(vol_path):
++            return image.Raw(vol_path)
++        return image.Cow(vol_path)
++
+     @classmethod
+     def activate(cls, dbg, uri, domain, cb):
+         this_host_label = cb.get_current_host()
+@@ -53,13 +59,15 @@ class COWDatapath(object):
+                             "SR_BACKEND_FAILURE_24",
+                             ["VDIInUse", "The VDI is currently in use"])
+                     vol_path = cb.volumeGetPath(opq, str(vdi.volume.id))
+-                    if vdi.sharable:
+-                        img = image.Raw(vol_path)
+-                    else:
++                    img = cls._get_image_from_vdi(vdi, vol_path)
++                    if not vdi.sharable:
+                         db.update_vdi_active_on(vdi.uuid, this_host_label)
+-                        img = image.Cow(vol_path)
+ 
+-                    cls.activate_internal(dbg, opq, vdi, img, cb)
++                    try:
++                        cls.activate_internal(dbg, opq, vdi, img, cb)
++                    except:
++                        log.debug('{}: activate_internal failed'.format(dbg))
++                        raise
+ 
+     @staticmethod
+     def deactivate_internal(dbg, opq, vdi, img, cb):
+@@ -73,11 +81,10 @@ class COWDatapath(object):
+                 with cb.db_context(opq) as db:
+                     vdi = db.get_vdi_by_id(key)
+                     vol_path = cb.volumeGetPath(opq, str(vdi.volume.id))
+-                    if vdi.sharable:
+-                        img = image.Raw(vol_path)
+-                    else:
++                    img = cls._get_image_from_vdi(vdi, vol_path)
++                    if not vdi.sharable:
+                         db.update_vdi_active_on(vdi.uuid, None)
+-                        img = image.Cow(vol_path)
++
+                     try:
+                         cls.deactivate_internal(dbg, opq, vdi, img, cb)
+                     except:
+diff --git a/xapi/storage/libs/libcow/imageformat.py b/xapi/storage/libs/libcow/imageformat.py
+index ed24bc3..a2fea54 100644
+--- a/xapi/storage/libs/libcow/imageformat.py
++++ b/xapi/storage/libs/libcow/imageformat.py
+@@ -1,9 +1,9 @@
+ """
+ Map image formats to datapath URIs and tools
+ """
+-from .vhdutil import VHDUtil
+ from .qcow2util import QCOW2Util
+ from .rawutil import RawUtil
++from .vhdutil import VHDUtil
+ 
+ 
+ class ImageFormat(object):
+@@ -13,6 +13,7 @@ class ImageFormat(object):
+     IMAGE_RAW = 0
+     IMAGE_VHD = 1
+     IMAGE_QCOW2 = 2
++
+     _formats = None
+ 
+     def __init__(self, uri_prefix, image_utils):
+diff --git a/xapi/storage/libs/libcow/metabase.py b/xapi/storage/libs/libcow/metabase.py
+index 4132fb4..91ce5a2 100644
+--- a/xapi/storage/libs/libcow/metabase.py
++++ b/xapi/storage/libs/libcow/metabase.py
+@@ -522,6 +522,18 @@ class VolumeMetabase(object):
+ 
+         return vdis
+ 
++    def get_all_volumes(self):
++        """
++        Get all volumes.
++        """
++        res = self._conn.execute("SELECT * FROM volume")
++
++        volumes = []
++        for row in res:
++            volumes.append(Volume.from_row(row))
++
++        return volumes
++
+     def get_children(self, volume_id):
+         """
+         Get direct children of the specified volume
+diff --git a/xapi/storage/libs/libcow/rawutil.py b/xapi/storage/libs/libcow/rawutil.py
+index 075a503..1bcd6dc 100644
+--- a/xapi/storage/libs/libcow/rawutil.py
++++ b/xapi/storage/libs/libcow/rawutil.py
+@@ -1,19 +1,20 @@
+-import os
++from xapi.storage.libs import util
++
+ 
+ MEBIBYTE = 2**20
+ 
+ 
+ class RawUtil(object):
+-
+     @staticmethod
+     def create(dbg, vol_path, size_mib):
+-        with open(vol_path, 'a') as vdi:
+-            # truncate is in bytes
+-            vdi.truncate(size_mib * MEBIBYTE)
++        if not util.is_block_device(vol_path):
++            with open(vol_path, 'a') as vdi:
++                # truncate is in bytes
++                vdi.truncate(size_mib * MEBIBYTE)
+ 
+     @staticmethod
+     def get_vsize(dbg, vol_path):
+-        return os.stat(vol_path).st_size
++        return util.get_file_size(vol_path)
+ 
+     @staticmethod
+     def getImgFormat(dbg):
+diff --git a/xapi/storage/libs/libcow/volume.py b/xapi/storage/libs/libcow/volume.py
+index 3862f38..2fc24ed 100644
+--- a/xapi/storage/libs/libcow/volume.py
++++ b/xapi/storage/libs/libcow/volume.py
+@@ -120,6 +120,10 @@ class COWVolume(object):
+             with cb.db_context(opq) as db:
+                 cb.volumeResize(opq, str(vdi.volume.id), vsize)
+                 vol_path = cb.volumeGetPath(opq, str(vdi.volume.id))
++                if (util.is_block_device(vol_path)):
++                    raise util.create_storage_error(
++                        'SR_BACKEND_FAILURE_110',
++                        ['Cannot resize block device', ''])
+                 image_format.image_utils.resize(dbg, vol_path, size_mib)
+                 db.update_volume_vsize(vdi.volume.id, vsize)
+ 
+@@ -168,6 +172,11 @@ class COWVolume(object):
+                               vdi.volume.parent_id)
+ 
+                     vol_path = cb.volumeGetPath(opq, str(vol_id))
++                    if (util.is_block_device(vol_path)):
++                        raise util.create_storage_error(
++                            'SR_BACKEND_FAILURE_82',
++                            ['Cannot clone or snapshot block device', ''])
++
+                     snap_volume = db.insert_child_volume(vol_id,
+                                                          vdi.volume.vsize)
+                     snap_path = cb.volumeCreate(opq, str(snap_volume.id),
+diff --git a/xapi/storage/libs/libcow/volume_implementation.py b/xapi/storage/libs/libcow/volume_implementation.py
+index 6122ee3..9b0bb0f 100644
+--- a/xapi/storage/libs/libcow/volume_implementation.py
++++ b/xapi/storage/libs/libcow/volume_implementation.py
+@@ -5,7 +5,6 @@ from xapi.storage.libs import util
+ 
+ @util.decorate_all_routines(util.log_exceptions_in_function)
+ class Implementation(xapi.storage.api.v5.volume.Volume_skeleton):
+-
+     def __init__(self, callbacks):
+         self.callbacks = callbacks
+ 
+diff --git a/xapi/storage/libs/util.py b/xapi/storage/libs/util.py
+index 1c9d370..21dc607 100644
+--- a/xapi/storage/libs/util.py
++++ b/xapi/storage/libs/util.py
+@@ -6,6 +6,7 @@ import inspect
+ import json
+ import os
+ import shutil
++import stat
+ import string
+ import subprocess
+ import sys
+@@ -34,6 +35,33 @@ def mkdir_p(path, mode=0o777):
+             raise
+ 
+ 
++def is_block_device(filename):
++    return stat.S_ISBLK(os.stat(filename).st_mode)
++
++
++def get_file_size(filename):
++    """
++    Get the size of a file or block device.
++    """
++    res = os.stat(filename)
++    if stat.S_ISBLK(res.st_mode):
++        with open(filename, 'rb') as f:
++            f.seek(0, 2)
++            return f.tell()
++    else:
++        return res.st_size
++
++
++def get_physical_file_size(filename):
++    res = os.stat(filename)
++    if stat.S_ISBLK(res.st_mode):
++        with open(filename, 'rb') as f:
++            f.seek(0, 2)
++            return f.tell()
++    else:
++        return res.st_blocks * 512
++
++
+ def lock_file(dbg, filename, mode='a+'):
+     lock_handle = open(filename, mode)
+     fcntl.flock(lock_handle, fcntl.LOCK_EX)
+-- 
+2.32.0
+

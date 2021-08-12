@@ -1,0 +1,39 @@
+From e4fb20c0398dcc25ac23c9a4ee48fc295844afd3 Mon Sep 17 00:00:00 2001
+From: Damien Thenot <Nambrok@users.noreply.github.com>
+Date: Wed, 19 Feb 2020 14:48:04 +0100
+Subject: [PATCH 03/11] fix(raw-device plugin): does not follow device symlink,
+ normalize it instead (#7)
+
+Changed realpath to normpath so that the symlink created is
+not followed.
+The dev list might change in a reboot, using by-id make it
+constant. If we follow the by-id symlink, an incorrect device can be used.
+---
+ plugins/volume/org.xen.xapi.storage.raw-device/volume.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/plugins/volume/org.xen.xapi.storage.raw-device/volume.py b/plugins/volume/org.xen.xapi.storage.raw-device/volume.py
+index 6d905c5..475f641 100644
+--- a/plugins/volume/org.xen.xapi.storage.raw-device/volume.py
++++ b/plugins/volume/org.xen.xapi.storage.raw-device/volume.py
+@@ -19,7 +19,7 @@ from xapi.storage.libs.libcow.volume_implementation import Implementation as \
+ class Implementation(DefaultImplementation):
+     def create(self, dbg, sr, name, description, size, sharable):
+         devices = util.get_sr_metadata(dbg, 'file://' + sr)['devices']
+-        devices = map(lambda x: os.path.realpath(x), devices)
++        devices = map(lambda x: os.path.normpath(x), devices)
+ 
+         with VolumeContext(self.callbacks, sr, 'w') as opq:
+             image_type = ImageFormat.IMAGE_RAW
+@@ -38,7 +38,7 @@ class Implementation(DefaultImplementation):
+                     free_device = None
+                     psize = sys.maxint
+                     for device in devices:
+-                        if device not in used_devices:
++                        if os.path.realpath(device) not in used_devices:
+                             device_size = util.get_physical_file_size(device)
+                             if device_size >= size and device_size < psize:
+                                 free_device = device
+-- 
+2.32.0
+

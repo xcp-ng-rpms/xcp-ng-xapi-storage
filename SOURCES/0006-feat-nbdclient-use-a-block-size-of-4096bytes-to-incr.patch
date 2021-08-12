@@ -1,0 +1,26 @@
+From fa7b2dcec396839feb24ca50d0543c0680b669e6 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 19 Dec 2019 11:04:26 +0100
+Subject: [PATCH 06/11] feat(nbdclient): use a block size of 4096bytes to
+ increase performance
+
+---
+ xapi/storage/libs/nbdclient.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xapi/storage/libs/nbdclient.py b/xapi/storage/libs/nbdclient.py
+index 2daa2a2..0b0103b 100644
+--- a/xapi/storage/libs/nbdclient.py
++++ b/xapi/storage/libs/nbdclient.py
+@@ -95,7 +95,7 @@ def create(dbg, host, name):
+     all = set(filter(lambda x: x.startswith("nbd"), os.listdir("/dev")))
+     for nbd in all.difference(used):
+         # try:
+-        call(dbg, ["nbd-client", host, "/dev/" + nbd, "-name", name])
++        call(dbg, ["nbd-client", host, "/dev/" + nbd, "-name", name, "-b", "4096"])
+         return Nbd(host, name, nbd)
+         # except:
+         #    pass # try another one
+-- 
+2.32.0
+

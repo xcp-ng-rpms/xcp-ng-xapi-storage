@@ -1,0 +1,92 @@
+From f09853ad37111ea0816d8fa8ac31091360fea0aa Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 19 Dec 2019 14:21:07 +0100
+Subject: [PATCH 09/11] feat(coalesce): kill task after 5s in stop_task
+
+---
+ xapi/storage/libs/libcow/coalesce.py | 27 +++++++++++++++++----------
+ xapi/storage/libs/util.py            | 21 +++++++++++++++++++++
+ 2 files changed, 38 insertions(+), 10 deletions(-)
+
+diff --git a/xapi/storage/libs/libcow/coalesce.py b/xapi/storage/libs/libcow/coalesce.py
+index 2c86567..c1b6d07 100755
+--- a/xapi/storage/libs/libcow/coalesce.py
++++ b/xapi/storage/libs/libcow/coalesce.py
+@@ -351,16 +351,23 @@ def start_task(dbg_msg, uri, callbacks, name, args):
+ 
+ 
+ def stop_task(dbg_msg, uri, callbacks, name):
+-    with VolumeContext(callbacks, uri, 'w') as opq:
+-        path = os.path.join(util.var_run_prefix(), 'sr',
+-                            callbacks.getUniqueIdentifier(opq),
+-                            name + '_task.pickle')
+-        with open(path) as f:
+-            process = pickle.load(f)
+-        process.kill()
+-        process.wait()
+-        log.debug(dbg_msg)
+-        os.unlink(path)
++    def stop():
++        with VolumeContext(callbacks, uri, 'w') as opq:
++            path = os.path.join(util.var_run_prefix(), 'sr',
++                                callbacks.getUniqueIdentifier(opq),
++                                name + '_task.pickle')
++            with open(path) as f:
++                process = pickle.load(f)
++            process.kill()
++            process.wait()
++            os.unlink(path)
++
++    try:
++        with util.timeout(5):
++            stop()
++    except util.TimeoutException:
++        log.error('Timeout reached for task: {}'.format(name))
++    log.debug(dbg_msg)
+ 
+ 
+ def start_background_tasks(dbg, sr_type, uri, callbacks):
+diff --git a/xapi/storage/libs/util.py b/xapi/storage/libs/util.py
+index 60b049c..2b76eea 100644
+--- a/xapi/storage/libs/util.py
++++ b/xapi/storage/libs/util.py
+@@ -1,4 +1,5 @@
+ from __future__ import absolute_import
++from contextlib import contextmanager
+ import errno
+ import fcntl
+ import importlib
+@@ -6,6 +7,7 @@ import inspect
+ import json
+ import os
+ import shutil
++import signal
+ import stat
+ import string
+ import subprocess
+@@ -394,3 +396,22 @@ def set_cgroup(pid, cgroup):
+         subprocess.check_call(['/usr/bin/cgclassify', '-g', cgroup, str(pid)])
+     except subprocess.CalledProcessError as e:
+         log.error('Unable to set cgroup {} of {}: {}'.format(cgroup, pid, e))
++
++
++class TimeoutException(Exception):
++    pass
++
++
++@contextmanager
++def timeout(seconds):
++    def handler(signum, frame):
++        raise TimeoutException
++
++    oldHandler = signal.signal(signal.SIGALRM, handler)
++
++    try:
++        signal.alarm(seconds)
++        yield
++    finally:
++        signal.alarm(0)
++        signal.signal(signal.SIGALRM, oldHandler)
+-- 
+2.32.0
+

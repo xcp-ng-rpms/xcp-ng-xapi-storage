@@ -1,0 +1,26 @@
+From a2f85b49e95ca28793d4c8c75cb2f0e265013a91 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 19 Dec 2019 11:05:47 +0100
+Subject: [PATCH 07/11] feat(nbdclient): ensure we use a none scheduler
+ (passthrough)
+
+---
+ xapi/storage/libs/nbdclient.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/xapi/storage/libs/nbdclient.py b/xapi/storage/libs/nbdclient.py
+index 0b0103b..0a63744 100644
+--- a/xapi/storage/libs/nbdclient.py
++++ b/xapi/storage/libs/nbdclient.py
+@@ -96,6 +96,8 @@ def create(dbg, host, name):
+     for nbd in all.difference(used):
+         # try:
+         call(dbg, ["nbd-client", host, "/dev/" + nbd, "-name", name, "-b", "4096"])
++        with open("/sys/block/" + nbd + "/queue/scheduler", "w") as fd:
++            fd.write("none")
+         return Nbd(host, name, nbd)
+         # except:
+         #    pass # try another one
+-- 
+2.32.0
+
