@@ -1,6 +1,6 @@
 Name:           xcp-ng-xapi-storage
 Version:        1.0.2
-Release:        4%{?dist}
+Release:        3.0.0.runx.1%{?dist}
 Summary:        XCP-ng implementation of the xapi-storage interface
 License:        LGPLv2.1
 URL:            https://github.com/xcp-ng/xcp-ng-xapi-storage
@@ -63,7 +63,7 @@ cd build
 %{_prefix}/lib/systemd/system/qemuback.service
 
 %changelog
-* Thu Aug 12 2021 Ronan Abhamon <ronan.abhamon@vates.fr> - 1.0.2-4
+* Thu Aug 12 2021 Ronan Abhamon <ronan.abhamon@vates.fr> - 1.0.2-3.0.0.runx.1
 - Add 0011-feat-datapath-provide-a-new-Fspdisk-plugin-to-suppor.patch
 
 * Wed Jul 01 2020 Samuel Verschelde <stormi-xcp@ylix.fr> - 1.0.2-3
