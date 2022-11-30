@@ -1,0 +1,331 @@
+From 5584029315e36fbb4a3bb3127cacbea72376b1af Mon Sep 17 00:00:00 2001
+From: Matias Ezequiel Vara Larsen <matias.vara@vates.fr>
+Date: Wed, 16 Mar 2022 10:30:04 +0100
+Subject: [PATCH 12/12] feat(fsp plugin): implement vdi creation by relying on
+ sr.scan()
+
+This commit replaces current workaround by using a subdirectory
+named directories in the file-uri directory that is passed during
+sr.create(). User has to create a symlink in this directory and
+then issue a sr.scan() to trigger the creation of a new vdi.
+To remove a volume, user has to remove the symlink and issue a
+sr.scan().
+
+Signed-off-by: Matias Ezequiel Vara Larsen <matias.vara@vates.fr>
+---
+ .../volume/org.xen.xapi.storage.fsp/fsp.py    |  3 +
+ .../volume/org.xen.xapi.storage.fsp/plugin.py |  2 -
+ plugins/volume/org.xen.xapi.storage.fsp/sr.py | 76 ++++++++++++++++++-
+ .../volume/org.xen.xapi.storage.fsp/volume.py | 67 +---------------
+ xapi/storage/libs/libcow/metabase.py          | 33 +++++---
+ 5 files changed, 100 insertions(+), 81 deletions(-)
+
+diff --git a/plugins/volume/org.xen.xapi.storage.fsp/fsp.py b/plugins/volume/org.xen.xapi.storage.fsp/fsp.py
+index 545e2cb..967f49f 100644
+--- a/plugins/volume/org.xen.xapi.storage.fsp/fsp.py
++++ b/plugins/volume/org.xen.xapi.storage.fsp/fsp.py
+@@ -5,3 +5,6 @@ class Callbacks(xapi.storage.libs.libcow.callbacks.Callbacks):
+ 
+     def getVolumeUriPrefix(self, opq):
+         return "fsp/" + opq + "|"
++
++    def volumeGetPhysSize(self, opq, name):
++        return 0
+diff --git a/plugins/volume/org.xen.xapi.storage.fsp/plugin.py b/plugins/volume/org.xen.xapi.storage.fsp/plugin.py
+index 1783a10..3fe095c 100644
+--- a/plugins/volume/org.xen.xapi.storage.fsp/plugin.py
++++ b/plugins/volume/org.xen.xapi.storage.fsp/plugin.py
+@@ -24,8 +24,6 @@ class Implementation(xapi.storage.api.v5.plugin.Plugin_skeleton):
+                 "SR_ATTACH",
+                 "SR_DETACH",
+                 "SR_CREATE",
+-                "VDI_CREATE", # TODO: Create a VDI_IMPORT feature.
+-                "VDI_DESTROY",
+                 "VDI_ATTACH",
+                 "VDI_ATTACH_OFFLINE",
+                 "VDI_DETACH",
+diff --git a/plugins/volume/org.xen.xapi.storage.fsp/sr.py b/plugins/volume/org.xen.xapi.storage.fsp/sr.py
+index 85d77ba..cbdea26 100644
+--- a/plugins/volume/org.xen.xapi.storage.fsp/sr.py
++++ b/plugins/volume/org.xen.xapi.storage.fsp/sr.py
+@@ -4,14 +4,20 @@ import os
+ import os.path
+ import sys
+ import urlparse
++import uuid
+ 
+ from xapi.storage import log
+ from xapi.storage.libs import util
+ from xapi.storage.libs.libcow.volume import COWVolume
++from xapi.storage.libs.libcow.callbacks import VolumeContext
++from xapi.storage.libs.libcow.imageformat import ImageFormat
++from xapi.storage.libs.libcow.lock import PollLock
+ import xapi.storage.api.v5.volume
+ 
+ import importlib
+ 
++DIRECTORY_KEY = 'directory'
++DIRECTORIES_PATH = 'directories'
+ 
+ @util.decorate_all_routines(util.log_exceptions_in_function)
+ class Implementation(xapi.storage.api.v5.volume.SR_skeleton):
+@@ -60,8 +66,11 @@ class Implementation(xapi.storage.api.v5.volume.SR_skeleton):
+         pass
+ 
+     def ls(self, dbg, sr):
+-        return COWVolume.ls(
+-            dbg, sr, importlib.import_module('fsp').Callbacks())
++        self._check_paths(dbg, sr)
++        # create new VDIs
++        self._scan(dbg, sr)
++        fsp = importlib.import_module('fsp')
++        return COWVolume.ls(dbg, sr, fsp.Callbacks())
+ 
+     def set_description(self, dbg, sr, new_description):
+         util.update_sr_metadata(
+@@ -70,6 +79,69 @@ class Implementation(xapi.storage.api.v5.volume.SR_skeleton):
+     def set_name(self, dbg, sr, new_name):
+         util.update_sr_metadata(dbg, 'file://' + sr, {'name': new_name})
+ 
++    def _create_vdi(self, sr, name, path):
++        fsp = importlib.import_module("fsp")
++        cb = fsp.Callbacks()
++        description = ""
++        sharable = False
++        vdi_uuid = str(uuid.uuid4())
++        with VolumeContext(cb, sr, 'w') as opq:
++            image_type = ImageFormat.IMAGE_DIRECTORY
++            image_format = ImageFormat.get_format(image_type)
++            with PollLock(opq, 'gl', cb, 0.5):
++                with cb.db_context(opq) as db:
++                    volume = db.insert_new_volume(0, image_type)
++                    db.insert_vdi(name, description, vdi_uuid, volume.id, sharable)
++                    volume_path = cb.volumeGetPath(opq, str(volume.id))
++                    db.set_vdi_custom_key(vdi_uuid, DIRECTORY_KEY, path, True)
++            os.symlink(path, volume_path)
++        return vdi_uuid
++
++    def _check_paths(self, dbg, sr):
++        all_vdis = {}
++        fsp = importlib.import_module("fsp")
++        cb = fsp.Callbacks()
++        with VolumeContext(cb, sr, 'w') as opq:
++            with PollLock(opq, 'gl', cb, 0.5):
++                with cb.db_context(opq) as db:
++                    # TODO: Filter on `DIRECTORY_KEY` instead of fetching all keys.
++                    all_vdis = db.get_all_vdi_custom_keys(True)
++        for vdi_uuid, vdi in all_vdis.iteritems():
++            directory = vdi.get(DIRECTORY_KEY)
++            if directory is not None and not os.path.exists(directory):
++                COWVolume.destroy(dbg, sr, vdi_uuid, cb)
++                log.debug('VDI destroyed due to broken symlink or missing directory {}: uuid={}'.format(
++                    directory, vdi_uuid))
++
++    def _get_all_volume_directories(self, sr):
++        all_vdis = {}
++        fsp = importlib.import_module("fsp")
++        cb = fsp.Callbacks()
++        with VolumeContext(cb, sr, 'w') as opq:
++            with PollLock(opq, 'gl', cb, 0.5):
++                with cb.db_context(opq) as db:
++                    all_vdis = db.get_all_vdi_custom_keys(True)
++        all_paths = set()
++        for vdi in all_vdis.itervalues():
++            directory = vdi.get(DIRECTORY_KEY)
++            if directory is not None:
++                all_paths.add(directory)
++        return all_paths
++
++    def _scan(self, dbg, sr):
++        meta = util.get_sr_metadata(dbg, 'file://' + sr)
++        # TODO: A future implementation should remove the DIRECTORIES_PATH directory
++        sr_dir = meta['uri'] + '/' + DIRECTORIES_PATH
++        all_paths = self._get_all_volume_directories(sr)
++        if os.path.exists(sr_dir):
++            for filename in os.listdir(sr_dir):
++                path = os.path.join(sr_dir, filename)
++                # isdir() supports both symlinks + directories
++                if os.path.isdir(path):
++                    if not path in all_paths:
++                        vdi_uuid = self._create_vdi(sr, filename, path)
++                        log.debug('New VDI with path {}: uuid={}'.format(filename, vdi_uuid))
++
+     def stat(self, dbg, sr):
+         if not os.path.isdir(sr):
+             raise xapi.storage.api.v5.volume.Sr_not_attached(sr)
+diff --git a/plugins/volume/org.xen.xapi.storage.fsp/volume.py b/plugins/volume/org.xen.xapi.storage.fsp/volume.py
+index d03845d..fddf663 100644
+--- a/plugins/volume/org.xen.xapi.storage.fsp/volume.py
++++ b/plugins/volume/org.xen.xapi.storage.fsp/volume.py
+@@ -3,68 +3,9 @@
+ import importlib
+ import os
+ import sys
+-import urlparse
+-import uuid
+ import xapi.storage.api.v5.volume
+-
+ from xapi.storage import log
+-from xapi.storage.libs import util
+-from xapi.storage.libs.libcow.callbacks import VolumeContext
+-from xapi.storage.libs.libcow.imageformat import ImageFormat
+-from xapi.storage.libs.libcow.lock import PollLock
+-from xapi.storage.libs.libcow.volume_implementation import Implementation as \
+-    DefaultImplementation
+-
+-
+-@util.decorate_all_routines(util.log_exceptions_in_function)
+-class Implementation(DefaultImplementation):
+-    def create(self, dbg, sr, name, description, size, sharable):
+-        # WORKAROUND: For the moment we can't use a config param to forward the
+-        # shared_dir string. We use the name field instead.
+-        # We must open few PRs in the upstream repositories to support that:
+-        # - xenopsd
+-        # - xapi-storage-script
+-        #
+-        # TODO: The VDI size is useless. So it would be more interesting to add
+-        # a VDI.import method instead of using VDI.create.
+-
+-        shared_dir = os.path.normpath(urlparse.urlparse(name).path)
+-        if not shared_dir or shared_dir == '.':
+-            raise ValueError('shared_dir param is empty')
+-        if not os.path.isdir(shared_dir):
+-            raise ValueError('shared_dir param is not a valid directory')
+-
+-        statvfs = os.statvfs(os.path.realpath(shared_dir))
+-        psize = statvfs.f_blocks * statvfs.f_frsize
+-
+-        with VolumeContext(self.callbacks, sr, 'w') as opq:
+-            image_type = ImageFormat.IMAGE_DIRECTORY
+-            image_format = ImageFormat.get_format(image_type)
+-            vdi_uuid = str(uuid.uuid4())
+-
+-            with PollLock(opq, 'gl', self.callbacks, 0.5):
+-                with self.callbacks.db_context(opq) as db:
+-                    volume = db.insert_new_volume(psize, image_type)
+-                    db.insert_vdi(
+-                        name, description, vdi_uuid, volume.id, sharable)
+-                    volume_path = self.callbacks.volumeGetPath(
+-                        opq, str(volume.id))
+-            os.symlink(shared_dir, volume_path)
+-
+-            vdi_uri = self.callbacks.getVolumeUriPrefix(opq) + vdi_uuid
+-
+-        return {
+-            'key': vdi_uuid,
+-            'uuid': vdi_uuid,
+-            'name': name,
+-            'description': description,
+-            'read_write': True,
+-            'virtual_size': psize,
+-            'physical_utilisation': 0,
+-            'uri': [image_format.uri_prefix + vdi_uri],
+-            'sharable': sharable,
+-            'keys': {}
+-        }
++from xapi.storage.libs.libcow.volume_implementation import Implementation
+ 
+ 
+ def call_volume_command():
+@@ -74,11 +15,7 @@ def call_volume_command():
+     cmd = xapi.storage.api.v5.volume.Volume_commandline(
+         Implementation(fsp.Callbacks()))
+     base = os.path.basename(sys.argv[0])
+-    if base == "Volume.create":
+-        cmd.create()
+-    elif base == "Volume.destroy":
+-        cmd.destroy()
+-    elif base == "Volume.set":
++    if base == "Volume.set":
+         cmd.set()
+     elif base == "Volume.set_description":
+         cmd.set_description()
+diff --git a/xapi/storage/libs/libcow/metabase.py b/xapi/storage/libs/libcow/metabase.py
+index 91ce5a2..a397568 100644
+--- a/xapi/storage/libs/libcow/metabase.py
++++ b/xapi/storage/libs/libcow/metabase.py
+@@ -260,8 +260,9 @@ class VolumeMetabase(object):
+                     vdi_uuid       TEXT NOT NULL,
+                     key            TEXT NOT NULL,
+                     value          TEXT,
++                    private        BOOLEAN NOT NULL CHECK (private IN (0, 1)),
+                     FOREIGN KEY(vdi_uuid) REFERENCES vdi(uuid),
+-                    UNIQUE (vdi_uuid, key) ON CONFLICT REPLACE
++                    UNIQUE (vdi_uuid, key, private) ON CONFLICT REPLACE
+                 )""")
+         if version < 1:
+             self._conn.execute("""
+@@ -765,24 +766,29 @@ class VolumeMetabase(object):
+             DELETE FROM refresh WHERE leaf_id=:leaf_id""",
+                            {'leaf_id': leaf_id})
+ 
+-    def get_vdi_custom_keys(self, vdi_uuid):
++    def get_vdi_custom_keys(self, vdi_uuid, private=False):
+         """
+         Get all custom_keys for vdi_uuid
+         """
+         res = self._conn.execute("""
+              SELECT * FROM vdi_custom_keys
+-             WHERE vdi_uuid=:vdi_uuid""", {"vdi_uuid": vdi_uuid})
++             WHERE vdi_uuid=:vdi_uuid
++               AND private=:private""",
++                                 {"vdi_uuid": vdi_uuid, "private": private})
+ 
+         custom_keys = {}
+         for row in res:
+             custom_keys[str(row["key"])] = row["value"]
+         return custom_keys
+ 
+-    def get_all_vdi_custom_keys(self):
++    def get_all_vdi_custom_keys(self, private=False):
+         """
+         Get all VDI custom keys
+         """
+-        res = self._conn.execute("SELECT * FROM vdi_custom_keys")
++        res = self._conn.execute("""
++             SELECT * FROM vdi_custom_keys
++             WHERE private=:private""", {"private": private})
++
+         custom_keys = {}
+         for row in res:
+             if row["vdi_uuid"] not in custom_keys:
+@@ -790,26 +796,29 @@ class VolumeMetabase(object):
+             custom_keys[row["vdi_uuid"]][row["key"]] = row["value"]
+         return custom_keys
+ 
+-    def set_vdi_custom_key(self, vdi_uuid, custom_key, value):
++    def set_vdi_custom_key(self, vdi_uuid, custom_key, value, private=False):
+         """
+         Update custom_key with value for vdi_uuid
+         """
+         self._conn.execute("""
+-             INSERT OR REPLACE INTO vdi_custom_keys(vdi_uuid, key, value)
+-             VALUES(:vdi_uuid, :key, :value)""",
++             INSERT OR REPLACE INTO vdi_custom_keys(vdi_uuid, key, value, private)
++             VALUES(:vdi_uuid, :key, :value, :private)""",
+                            {"vdi_uuid": vdi_uuid,
+                             "key": custom_key,
+-                            "value": value})
++                            "value": value,
++                            "private": private})
+ 
+-    def delete_vdi_custom_key(self, vdi_uuid, custom_key):
++    def delete_vdi_custom_key(self, vdi_uuid, custom_key, private=False):
+         """
+         Delete the specified custom_key for the specified vdi_uuid
+         """
+         self._conn.execute("""
+             DELETE from vdi_custom_keys WHERE vdi_uuid=:vdi_uuid
+-            AND key=:key""",
++            AND key=:key
++            AND private=:private""",
+                            {"vdi_uuid": vdi_uuid,
+-                            "key": custom_key})
++                            "key": custom_key,
++                            "private": private})
+ 
+     def get_vdi_chain_height(self, vdi_uuid):
+         """
+-- 
+2.38.1
+

@@ -1,7 +1,7 @@
 From c427b09e7b4ee4190662852c7f95c6d848e8f26e Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Thu, 19 Dec 2019 14:17:19 +0100
-Subject: [PATCH 08/11] feat(callbacks): add a trash folder to destroy volumes
+Subject: [PATCH 08/12] feat(callbacks): add a trash folder to destroy volumes
  only after coalesce
 
 ---
@@ -76,5 +76,5 @@ index c58a142..2c86567 100755
  
  def start_task(dbg_msg, uri, callbacks, name, args):
 -- 
-2.32.0
+2.38.1
 

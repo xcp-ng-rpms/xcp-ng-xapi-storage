@@ -1,7 +1,7 @@
 From f2d24e91ef5d63273b89e9150cf47a19fa7c20f1 Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Tue, 5 Nov 2019 13:53:16 +0100
-Subject: [PATCH 02/11] fix(qemudisk): connect must raise only after N attempts
+Subject: [PATCH 02/12] fix(qemudisk): connect must raise only after N attempts
 
 ---
  xapi/storage/libs/qemudisk.py | 5 +++--
@@ -24,5 +24,5 @@ index 1e1f5fe..8ea8cf9 100644
      def _qmp_disconnect(self, dbg):
          try:
 -- 
-2.32.0
+2.38.1
 

@@ -1,6 +1,6 @@
 Name:           xcp-ng-xapi-storage
 Version:        1.0.2
-Release:        3.0.0.runx.1%{?dist}
+Release:        3.0.0.runx.2%{?dist}
 Summary:        XCP-ng implementation of the xapi-storage interface
 License:        LGPLv2.1
 URL:            https://github.com/xcp-ng/xcp-ng-xapi-storage
@@ -17,6 +17,7 @@ Patch7: 0008-feat-callbacks-add-a-trash-folder-to-destroy-volumes.patch
 Patch8: 0009-feat-coalesce-kill-task-after-5s-in-stop_task.patch
 Patch9: 0010-chore-README.md-fix-dependencies-to-install-destinat.patch
 Patch10: 0011-feat-datapath-provide-a-new-Fspdisk-plugin-to-suppor.patch
+Patch11: 0012-feat-fsp-plugin-implement-vdi-creation-by-relying-on.patch
 
 BuildRequires:  cmake3
 BuildRequires:  make
@@ -63,6 +64,9 @@ cd build
 %{_prefix}/lib/systemd/system/qemuback.service
 
 %changelog
+* Wed Nov 30 2022 Ronan Abhamon <ronan.abhamon@vates.fr> - 1.0.2-3.0.0.runx.2
+- Add 0012-feat-fsp-plugin-implement-vdi-creation-by-relying-on.patch
+
 * Thu Aug 12 2021 Ronan Abhamon <ronan.abhamon@vates.fr> - 1.0.2-3.0.0.runx.1
 - Add 0011-feat-datapath-provide-a-new-Fspdisk-plugin-to-suppor.patch
 

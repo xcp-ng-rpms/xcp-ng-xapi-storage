@@ -1,7 +1,7 @@
 From f09853ad37111ea0816d8fa8ac31091360fea0aa Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Thu, 19 Dec 2019 14:21:07 +0100
-Subject: [PATCH 09/11] feat(coalesce): kill task after 5s in stop_task
+Subject: [PATCH 09/12] feat(coalesce): kill task after 5s in stop_task
 
 ---
  xapi/storage/libs/libcow/coalesce.py | 27 +++++++++++++++++----------
@@ -88,5 +88,5 @@ index 60b049c..2b76eea 100644
 +        signal.alarm(0)
 +        signal.signal(signal.SIGALRM, oldHandler)
 -- 
-2.32.0
+2.38.1
 

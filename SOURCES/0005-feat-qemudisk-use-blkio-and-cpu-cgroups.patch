@@ -1,7 +1,7 @@
 From 88d8922d766e199762b86ae7ed0392e724497e42 Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Thu, 19 Dec 2019 11:03:23 +0100
-Subject: [PATCH 05/11] feat(qemudisk): use blkio and cpu cgroups
+Subject: [PATCH 05/12] feat(qemudisk): use blkio and cpu cgroups
 
 ---
  xapi/storage/libs/qemudisk.py | 9 +++++++++
@@ -58,5 +58,5 @@ index 21dc607..60b049c 100644
 +    except subprocess.CalledProcessError as e:
 +        log.error('Unable to set cgroup {} of {}: {}'.format(cgroup, pid, e))
 -- 
-2.32.0
+2.38.1
 

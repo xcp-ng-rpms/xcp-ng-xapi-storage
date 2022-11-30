@@ -1,7 +1,7 @@
 From e4fb20c0398dcc25ac23c9a4ee48fc295844afd3 Mon Sep 17 00:00:00 2001
 From: Damien Thenot <Nambrok@users.noreply.github.com>
 Date: Wed, 19 Feb 2020 14:48:04 +0100
-Subject: [PATCH 03/11] fix(raw-device plugin): does not follow device symlink,
+Subject: [PATCH 03/12] fix(raw-device plugin): does not follow device symlink,
  normalize it instead (#7)
 
 Changed realpath to normpath so that the symlink created is
@@ -35,5 +35,5 @@ index 6d905c5..475f641 100644
                              if device_size >= size and device_size < psize:
                                  free_device = device
 -- 
-2.32.0
+2.38.1
 

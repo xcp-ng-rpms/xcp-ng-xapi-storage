@@ -1,7 +1,7 @@
 From 2b11b2c25752d5c7612a4b06ab29c682d531a941 Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Wed, 5 May 2021 11:23:56 +0200
-Subject: [PATCH 10/11] chore(README.md): fix dependencies to install +
+Subject: [PATCH 10/12] chore(README.md): fix dependencies to install +
  destination directory + systemctl reload
 
 ---
@@ -37,5 +37,5 @@ index 4045167..c6ade22 100644
  ```
  
 -- 
-2.32.0
+2.38.1
 

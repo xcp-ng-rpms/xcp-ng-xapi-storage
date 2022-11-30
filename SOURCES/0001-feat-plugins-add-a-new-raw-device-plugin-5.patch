@@ -1,7 +1,7 @@
 From 3fd6c20aaab24dc15bd00a57ab029d8c868ccba7 Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@gmail.com>
 Date: Mon, 23 Sep 2019 10:16:10 +0200
-Subject: [PATCH 01/11] feat(plugins): add a new raw-device plugin (#5)
+Subject: [PATCH 01/12] feat(plugins): add a new raw-device plugin (#5)
 
 ---
  CMakeLists.txt                                |   1 +
@@ -595,5 +595,5 @@ index 1c9d370..21dc607 100644
      lock_handle = open(filename, mode)
      fcntl.flock(lock_handle, fcntl.LOCK_EX)
 -- 
-2.32.0
+2.38.1
 

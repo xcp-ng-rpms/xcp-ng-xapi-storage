@@ -1,7 +1,7 @@
 From 2d5e7dbd61dbc10fa9c669dfaf70cb06c40880fa Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Thu, 19 Dec 2019 11:01:38 +0100
-Subject: [PATCH 04/11] fix(qemuback): use communicate method to wait process
+Subject: [PATCH 04/12] fix(qemuback): use communicate method to wait process
  termination in read call
 
 ---
@@ -24,5 +24,5 @@ index d004766..eafb01e 100755
  
  def found_new_qdisk(domid, devid, uuid):
 -- 
-2.32.0
+2.38.1
 

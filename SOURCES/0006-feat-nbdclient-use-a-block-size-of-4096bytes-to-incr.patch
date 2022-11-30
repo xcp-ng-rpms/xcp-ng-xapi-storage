@@ -1,7 +1,7 @@
 From fa7b2dcec396839feb24ca50d0543c0680b669e6 Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Thu, 19 Dec 2019 11:04:26 +0100
-Subject: [PATCH 06/11] feat(nbdclient): use a block size of 4096bytes to
+Subject: [PATCH 06/12] feat(nbdclient): use a block size of 4096bytes to
  increase performance
 
 ---
@@ -22,5 +22,5 @@ index 2daa2a2..0b0103b 100644
          # except:
          #    pass # try another one
 -- 
-2.32.0
+2.38.1
 

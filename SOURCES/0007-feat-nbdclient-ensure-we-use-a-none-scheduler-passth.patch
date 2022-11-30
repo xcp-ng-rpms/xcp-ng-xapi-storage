@@ -1,7 +1,7 @@
 From a2f85b49e95ca28793d4c8c75cb2f0e265013a91 Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Thu, 19 Dec 2019 11:05:47 +0100
-Subject: [PATCH 07/11] feat(nbdclient): ensure we use a none scheduler
+Subject: [PATCH 07/12] feat(nbdclient): ensure we use a none scheduler
  (passthrough)
 
 ---
@@ -22,5 +22,5 @@ index 0b0103b..0a63744 100644
          # except:
          #    pass # try another one
 -- 
-2.32.0
+2.38.1
 
