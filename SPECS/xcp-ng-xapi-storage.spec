@@ -10,14 +10,41 @@ BuildRequires:  cmake3
 BuildRequires:  make
 BuildRequires:  python-setuptools
 
-Requires:       nbd
-Requires:       python-psutil
-#Requires:       qemu-dp
-Requires:       systemd
-Requires:       xapi-storage
-
 %description
 XCP-ng implementation of the xapi-storage interface.
+
+%package        libs
+Summary:        XCP-ng implementation of SMAPIv3 storage-scripts libraries
+Requires:       xapi-storage
+Requires:       nbd
+Conflicts:      xcp-ng-xapi-storage
+
+%description    libs
+Common python code for various SMAPIv3 Datapath and Volume plugins.
+
+%package        datapath-tapdisk
+Summary:        XCP-ng implementation of tapdisk SMAPIv3 Datapath plugin
+Requires:       xcp-ng-xapi-storage-libs
+Requires:       blktap
+Conflicts:      xcp-ng-xapi-storage
+
+%description    datapath-tapdisk
+SMAPIv3 Datapath plugins using tapdisk
+
+#%%package        datapath-qemudisk
+#Summary:        XCP-ng implementation of qcow2 SMAPIv3 Datapath plugin
+#Requires:       python-psutil
+#Requires:       qemu-dp
+#Requires:       systemd
+
+%package        volume-zfsvol
+Summary:        XCP-ng implementation of ZFS SMAPIv3 Volume plugin
+Requires:       xcp-ng-xapi-storage-libs
+Requires:       xcp-ng-xapi-storage-datapath-tapdisk
+Requires:       zfs >= 2.1
+
+%description    volume-zfsvol
+SMAPIv3 Volume plugins storing each VDI in a ZFS volume.
 
 %prep
 %autosetup -p1
@@ -41,19 +68,28 @@ cd build
 #%%postun
 #%%systemd_postun_with_restart qemuback.service
 
-%files
+%files libs
 %license LICENSE README.md
-#%%{_bindir}/qemuback.py
 %{_docdir}/xcp-ng-xapi-storage/
-%{_libexecdir}/xapi-storage-script/
 %{_prefix}/lib/python2.7/site-packages/xapi/storage/libs/
 %{_prefix}/lib/python2.7/site-packages/xcp_ng_xapi_storage_libs-*-py2.7.egg-info
+
+%files datapath-tapdisk
+%{_libexecdir}/xapi-storage-script/datapath/tapdisk
+
+#%%files datapath-qemudisk
+#%%{_libexecdir}/xapi-storage-script/datapath/qemudisk
+#%%{_bindir}/qemuback.py
 #%%{_prefix}/lib/systemd/system/qemuback.service
+
+%files volume-zfsvol
+%{_libexecdir}/xapi-storage-script/volume/org.xen.xapi.storage.zfs-vol
 
 %changelog
 * next - 1.2.0-1
 - Include new zfs-vol volume plugin
 - Stop shipping qemudisk datapath plugins, qemuback daemon, and other volume plugins
+- Split RPM between libs and individual datapath and volume plugins
 
 * Fri Jan 13 2023 Ronan Abhamon <ronan.abhamon@vates.fr> - 1.1.0-1
 - Add a new RAW device plugin
