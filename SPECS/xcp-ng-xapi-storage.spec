@@ -8,6 +8,8 @@ Source0:        https://github.com/xcp-ng/xcp-ng-xapi-storage/archive/v%{version
 
 Patch0:         xcp-ng-xapi-storage-1.1.0-zfs-zvol.patch
 
+BuildArch: noarch
+
 BuildRequires:  cmake3
 BuildRequires:  make
 BuildRequires:  python-setuptools
@@ -89,6 +91,7 @@ cd build
 
 %changelog
 * Wed Mar 24 2024 Yann Dirson <yann.dirson@vates.tech> - 1.1.0-1.0.zfsvol.0
+- Change package to noarch
 - Include new zfs-vol volume plugin
 - Stop shipping qemudisk datapath plugins, qemuback daemon, and other volume plugins
 - Split RPM between libs and individual datapath and volume plugins
