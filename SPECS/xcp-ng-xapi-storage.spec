@@ -6,6 +6,8 @@ License:        LGPLv2.1
 URL:            https://github.com/xcp-ng/xcp-ng-xapi-storage
 Source0:        https://github.com/xcp-ng/xcp-ng-xapi-storage/archive/v%{version}/%{name}-%{version}.tar.gz
 
+BuildArch: noarch
+
 BuildRequires:  cmake3
 BuildRequires:  make
 BuildRequires:  python-setuptools
@@ -86,8 +88,9 @@ cd build
 %{_libexecdir}/xapi-storage-script/volume/org.xen.xapi.storage.zfs-vol
 
 %changelog
-* next - 1.2.0-1
+* Thu Apr 04 2024 Yann Dirson <yann.dirson@vates.tech> - 1.2.0-1
 - Include new zfs-vol volume plugin
+- Change package to noarch
 - Stop shipping qemudisk datapath plugins, qemuback daemon, and other volume plugins
 - Split RPM between libs and individual datapath and volume plugins
 
