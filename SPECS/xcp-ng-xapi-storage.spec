@@ -1,5 +1,5 @@
 Name:           xcp-ng-xapi-storage
-Version:        1.1.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        XCP-ng implementation of the xapi-storage interface
 License:        LGPLv2.1
@@ -12,7 +12,7 @@ BuildRequires:  python-setuptools
 
 Requires:       nbd
 Requires:       python-psutil
-Requires:       qemu-dp
+#Requires:       qemu-dp
 Requires:       systemd
 Requires:       xapi-storage
 
@@ -32,25 +32,29 @@ make
 cd build
 %make_install
 
-%post
-%systemd_post qemuback.service
-
-%preun
-%systemd_preun qemuback.service
-
-%postun
-%systemd_postun_with_restart qemuback.service
+#%%post
+#%%systemd_post qemuback.service
+#
+#%%preun
+#%%systemd_preun qemuback.service
+#
+#%%postun
+#%%systemd_postun_with_restart qemuback.service
 
 %files
 %license LICENSE README.md
-%{_bindir}/qemuback.py
+#%%{_bindir}/qemuback.py
 %{_docdir}/xcp-ng-xapi-storage/
 %{_libexecdir}/xapi-storage-script/
 %{_prefix}/lib/python2.7/site-packages/xapi/storage/libs/
 %{_prefix}/lib/python2.7/site-packages/xcp_ng_xapi_storage_libs-*-py2.7.egg-info
-%{_prefix}/lib/systemd/system/qemuback.service
+#%%{_prefix}/lib/systemd/system/qemuback.service
 
 %changelog
+* next - 1.2.0-1
+- Include new zfs-vol volume plugin
+- Stop shipping qemudisk datapath plugins, qemuback daemon, and other volume plugins
+
 * Fri Jan 13 2023 Ronan Abhamon <ronan.abhamon@vates.fr> - 1.1.0-1
 - Add a new RAW device plugin
 - Add a trash folder to destroy volumes during coalesce
