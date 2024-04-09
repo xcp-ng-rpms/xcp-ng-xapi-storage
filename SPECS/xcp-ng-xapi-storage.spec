@@ -1,6 +1,6 @@
 Name:           xcp-ng-xapi-storage
 Version:        1.2.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        XCP-ng implementation of the xapi-storage interface
 License:        LGPLv2.1
 URL:            https://github.com/xcp-ng/xcp-ng-xapi-storage
@@ -19,6 +19,7 @@ XCP-ng implementation of the xapi-storage interface.
 Summary:        XCP-ng implementation of SMAPIv3 storage-scripts libraries
 Requires:       xapi-storage
 Requires:       nbd
+Requires:       python2-psutil
 Conflicts:      xcp-ng-xapi-storage
 
 %description    libs
@@ -88,6 +89,9 @@ cd build
 %{_libexecdir}/xapi-storage-script/volume/org.xen.xapi.storage.zfs-vol
 
 %changelog
+* Tue Apr 09 2024 Guillaume Thouvenin <guillaume.thouvenin@vates.tech> - 1.2.0-2
+- Add missing dependency to python2-psutil
+
 * Thu Apr 04 2024 Yann Dirson <yann.dirson@vates.tech> - 1.2.0-1
 - Include new zfs-vol volume plugin
 - Change package to noarch
