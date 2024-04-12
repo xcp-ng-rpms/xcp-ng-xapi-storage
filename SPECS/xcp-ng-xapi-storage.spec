@@ -1,6 +1,6 @@
 Name:           xcp-ng-xapi-storage
 Version:        1.2.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        XCP-ng implementation of the xapi-storage interface
 License:        LGPLv2.1
 URL:            https://github.com/xcp-ng/xcp-ng-xapi-storage
@@ -32,7 +32,7 @@ Requires:       blktap
 Conflicts:      xcp-ng-xapi-storage
 
 %description    datapath-tapdisk
-SMAPIv3 Datapath plugins using tapdisk
+SMAPIv3 Datapath plugin using tapdisk
 
 #%%package        datapath-qemudisk
 #Summary:        XCP-ng implementation of qcow2 SMAPIv3 Datapath plugin
@@ -47,7 +47,7 @@ Requires:       xcp-ng-xapi-storage-datapath-tapdisk
 Requires:       zfs >= 2.1
 
 %description    volume-zfsvol
-SMAPIv3 Volume plugins storing each VDI in a ZFS volume.
+SMAPIv3 Volume plugin managing ZFS volumes.
 
 %prep
 %autosetup -p1
@@ -61,6 +61,9 @@ make
 %install
 cd build
 %make_install
+
+%post
+systemctl daemon-reload
 
 #%%post
 #%%systemd_post qemuback.service
@@ -89,6 +92,10 @@ cd build
 %{_libexecdir}/xapi-storage-script/volume/org.xen.xapi.storage.zfs-vol
 
 %changelog
+* Fri Apr 12 2024 Guillaume Thouvenin <guillaume.thouvenin@vates.tech> - 1.2.0-3
+- Reword description of volume-zfsvol and datapath-tapdisk
+- Reload systemd manager configuration after installing package
+
 * Tue Apr 09 2024 Guillaume Thouvenin <guillaume.thouvenin@vates.tech> - 1.2.0-2
 - Add missing dependency to python2-psutil
 
