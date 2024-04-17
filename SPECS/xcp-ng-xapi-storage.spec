@@ -1,6 +1,6 @@
 Name:           xcp-ng-xapi-storage
 Version:        1.2.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        XCP-ng implementation of the xapi-storage interface
 License:        LGPLv2.1
 URL:            https://github.com/xcp-ng/xcp-ng-xapi-storage
@@ -18,6 +18,7 @@ XCP-ng implementation of the xapi-storage interface.
 %package        libs
 Summary:        XCP-ng implementation of SMAPIv3 storage-scripts libraries
 Requires:       xapi-storage
+Requires:       xapi-storage-script
 Requires:       nbd
 Requires:       python2-psutil
 Conflicts:      xcp-ng-xapi-storage
@@ -32,7 +33,7 @@ Requires:       blktap
 Conflicts:      xcp-ng-xapi-storage
 
 %description    datapath-tapdisk
-SMAPIv3 Datapath plugins using tapdisk
+SMAPIv3 Datapath plugin using tapdisk
 
 #%%package        datapath-qemudisk
 #Summary:        XCP-ng implementation of qcow2 SMAPIv3 Datapath plugin
@@ -47,7 +48,7 @@ Requires:       xcp-ng-xapi-storage-datapath-tapdisk
 Requires:       zfs >= 2.1
 
 %description    volume-zfsvol
-SMAPIv3 Volume plugins storing each VDI in a ZFS volume.
+SMAPIv3 Volume plugin storing each VDI in a ZFS volume.
 
 %prep
 %autosetup -p1
@@ -62,6 +63,8 @@ make
 cd build
 %make_install
 
+# qemuback has been disabled because currently it is not working and it needs
+# to be fixed. When fixed we will renable it.
 #%%post
 #%%systemd_post qemuback.service
 #
@@ -89,6 +92,11 @@ cd build
 %{_libexecdir}/xapi-storage-script/volume/org.xen.xapi.storage.zfs-vol
 
 %changelog
+* Tue Apr 16 2024 Guillaume Thouvenin <guillaume.thouvenin@vates.tech> - 1.2.0-3
+- Add missing dependency to xapi-storage-script
+- Minor fixes in datapath and volume description
+- Add a comment regarding disabling qemuback.service
+
 * Tue Apr 09 2024 Guillaume Thouvenin <guillaume.thouvenin@vates.tech> - 1.2.0-2
 - Add missing dependency to python2-psutil
 
