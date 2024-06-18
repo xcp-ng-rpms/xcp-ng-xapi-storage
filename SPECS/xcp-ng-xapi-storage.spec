@@ -1,6 +1,6 @@
 Name:           xcp-ng-xapi-storage
-Version:        1.2.0
-Release:        3%{?dist}
+Version:        1.2.1
+Release:        1%{?dist}
 Summary:        XCP-ng implementation of the xapi-storage interface
 License:        LGPLv2.1
 URL:            https://github.com/xcp-ng/xcp-ng-xapi-storage
@@ -20,7 +20,6 @@ Summary:        XCP-ng implementation of SMAPIv3 storage-scripts libraries
 Requires:       xapi-storage
 Requires:       xapi-storage-script
 Requires:       nbd
-Requires:       python2-psutil
 Conflicts:      xcp-ng-xapi-storage
 
 %description    libs
@@ -79,6 +78,9 @@ cd build
 %{_docdir}/xcp-ng-xapi-storage/
 %{_prefix}/lib/python2.7/site-packages/xapi/storage/libs/
 %{_prefix}/lib/python2.7/site-packages/xcp_ng_xapi_storage_libs-*-py2.7.egg-info
+# Don't install qcow2util.py and qemudisk.py because qcow2 is not yet supported
+%exclude %{_prefix}/lib/python2.7/site-packages/xapi/storage/libs/libcow/qcow2util.py
+%exclude %{_prefix}/lib/python2.7/site-packages/xapi/storage/libs/qemudisk.py
 
 %files datapath-tapdisk
 %{_libexecdir}/xapi-storage-script/datapath/tapdisk
@@ -92,6 +94,10 @@ cd build
 %{_libexecdir}/xapi-storage-script/volume/org.xen.xapi.storage.zfs-vol
 
 %changelog
+* Tue Jun 18 2024 Guillaume Thouvenin <guillaume.thouvenin@vates.tech> - 1.2.1-1
+- Don't install qcow2util.py and qemudisk.py because qcow2 is not yet supported
+- Remove dependency to python2-psutil that was required by qcow2
+
 * Tue Apr 16 2024 Guillaume Thouvenin <guillaume.thouvenin@vates.tech> - 1.2.0-3
 - Add missing dependency to xapi-storage-script
 - Minor fixes in datapath and volume description
